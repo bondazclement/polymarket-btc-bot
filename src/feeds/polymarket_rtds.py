@@ -7,6 +7,7 @@ the current price and price_to_beat for the active 5-minute window.
 """
 
 import asyncio
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -53,6 +54,7 @@ class PolymarketRTDS:
         self.max_reconnect_delay: int = 30
         self.ws: aiohttp.ClientWebSocketResponse | None = None
         self._session: aiohttp.ClientSession | None = None
+        self.last_message_ts: float = 0.0
 
     async def connect(self) -> None:
         """Connect to the Polymarket RTDS WebSocket stream."""
@@ -96,6 +98,7 @@ class PolymarketRTDS:
             if msg.type == aiohttp.WSMsgType.TEXT:
                 data = orjson.loads(msg.data)
                 self._handle_message(data)
+                self.last_message_ts = time.monotonic()
             elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
                 break
 
@@ -121,6 +124,14 @@ class PolymarketRTDS:
         logger.info("Reconnecting to Polymarket RTDS WebSocket", delay=delay)
         await asyncio.sleep(delay)
         self.reconnect_attempts += 1
+
+    def get_last_message_ts(self) -> float:
+        """Get the timestamp of the last successfully parsed message.
+
+        Returns:
+            Monotonic timestamp of last message, or 0.0 if none received.
+        """
+        return self.last_message_ts
 
     def get_chainlink_price(self) -> Optional[float]:
         """Get the current Chainlink BTC/USD price.

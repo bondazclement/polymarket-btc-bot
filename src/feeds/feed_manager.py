@@ -7,7 +7,8 @@ concurrently and performs health checks to monitor their status.
 """
 
 import asyncio
-from typing import Dict, Optional
+import time
+from typing import Any, Dict, List
 
 from structlog import get_logger
 
@@ -39,32 +40,45 @@ class FeedManager:
             "polymarket_rtds": False,
             "polymarket_clob": False,
         }
+        self._tasks: List[asyncio.Task[Any]] = []
 
     async def start_all(self) -> None:
-        """Start all WebSocket feeds concurrently."""
-        tasks = [
+        """Start all WebSocket feeds and health monitor as background tasks."""
+        self._tasks = [
             asyncio.create_task(self.binance_feed.connect()),
             asyncio.create_task(self.polymarket_rtds_feed.connect()),
             asyncio.create_task(self.polymarket_clob_feed.connect()),
+            asyncio.create_task(self.monitor_health()),
         ]
-        await asyncio.gather(*tasks)
 
     async def stop_all(self) -> None:
         """Stop all WebSocket feeds gracefully."""
         logger.info("Stopping all WebSocket feeds")
+        for task in self._tasks:
+            task.cancel()
+        self._tasks.clear()
 
     async def health_check(self) -> None:
         """Perform a health check on all feeds.
 
-        This method checks if each feed has received a message in the last 30 seconds
+        Checks if each feed has received a message in the last 30 seconds
         and updates the health status accordingly.
         """
-        # Placeholder for health check logic
-        # In a real implementation, this would check the last message timestamp for each feed
-        # For now, we assume all feeds are healthy if they are connected
-        self.health_status["binance"] = True
-        self.health_status["polymarket_rtds"] = True
-        self.health_status["polymarket_clob"] = True
+        now = time.monotonic()
+        stale_threshold = 30.0
+
+        feeds: Dict[str, Any] = {
+            "binance": self.binance_feed,
+            "polymarket_rtds": self.polymarket_rtds_feed,
+            "polymarket_clob": self.polymarket_clob_feed,
+        }
+
+        for name, feed in feeds.items():
+            last_ts = feed.get_last_message_ts()
+            if last_ts == 0.0:
+                self.health_status[name] = False
+            else:
+                self.health_status[name] = (now - last_ts) < stale_threshold
 
         logger.info("Health check completed", status=self.health_status)
 

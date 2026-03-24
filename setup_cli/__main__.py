@@ -182,6 +182,8 @@ async def create_env_file() -> bool:
 async def test_clob_connection() -> bool:
     """Test the connection to the Polymarket CLOB.
 
+    Uses Level 0 endpoints (no auth required) to validate connectivity.
+
     Returns:
         True if the connection test was successful, False otherwise.
     """
@@ -190,20 +192,18 @@ async def test_clob_connection() -> bool:
     print("=" * 50)
 
     try:
-        # Import here to avoid issues if dependencies are not installed yet
         from py_clob_client.client import ClobClient
 
-        client = ClobClient(
-            private_key="",
-            funder="",
-            api_key="",
-            api_secret="",
-            passphrase="",
-            rpc_url="",
-        )
-        await client.get_ok()
-        print("✅ CLOB connection test successful")
-        return True
+        # Level 0 test: no key/chain_id needed
+        client = ClobClient(host="https://clob.polymarket.com")
+        ok = client.get_ok()
+        server_time = client.get_server_time()
+        if ok == "OK":
+            print(f"✅ CLOB connection OK (server time: {server_time})")
+            return True
+        else:
+            print(f"❌ CLOB returned unexpected response: {ok}")
+            return False
     except Exception as e:
         print(f"❌ CLOB connection test failed: {e}")
         return False
