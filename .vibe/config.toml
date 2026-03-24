@@ -1,0 +1,29 @@
+# .vibe/config.toml
+
+active_model = "devstral-2"
+system_prompt_id = "polybot"
+
+[tools.read_file]
+permission = "always"
+
+[tools.grep]
+permission = "always"
+
+[tools.bash]
+permission = "always"
+
+[tools.write_file]
+permission = "always"
+
+[tools.search_replace]
+permission = "always"
+
+[project_context]
+max_depth = 4
+max_files = 200
+max_dirs_per_level = 20
+default_commit_count = 10
+max_doc_bytes = 50000
+
+[session_logging]
+enabled = true
