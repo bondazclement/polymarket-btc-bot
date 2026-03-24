@@ -70,10 +70,12 @@ class BinanceWebSocket:
                 await self._listen()
             except Exception as e:
                 logger.error("Binance WebSocket error", error=str(e))
-                if self._session:
+            finally:
+                if self._session and not self._session.closed:
                     await self._session.close()
-                    self._session = None
-                await self._reconnect()
+                self._session = None
+                self.ws = None
+            await self._reconnect()
 
     async def _listen(self) -> None:
         """Listen for incoming messages from the WebSocket."""

@@ -46,7 +46,7 @@ class PolymarketCLOBWebSocket:
 
     def __init__(self) -> None:
         """Initialize the Polymarket CLOB WebSocket client."""
-        self.ws_url: str = f"{CONFIG.POLYMARKET_CLOB_URL}/ws/market"
+        self.ws_url: str = CONFIG.POLYMARKET_CLOB_WS_URL
         self.order_books: Dict[str, Dict[str, List[OrderBookLevel]]] = {}
         self.reconnect_attempts: int = 0
         self.max_reconnect_delay: int = 30
@@ -67,21 +67,27 @@ class PolymarketCLOBWebSocket:
                 await self._listen()
             except Exception as e:
                 logger.error("Polymarket CLOB WebSocket error", error=str(e))
-                if self._session:
+            finally:
+                if self._session and not self._session.closed:
                     await self._session.close()
-                    self._session = None
-                await self._reconnect()
+                self._session = None
+                self.ws = None
+            await self._reconnect()
 
     async def _subscribe(self) -> None:
         """Subscribe to the order book for the active market."""
+        # TODO: Validate subscribe message format and response types
+        # against live Polymarket WebSocket during first dry-run.
+        # Current format is based on documentation review;
+        # may need adjustment based on actual API responses.
         if self.ws is None:
             return
 
         subscribe_message = orjson.dumps(
             {
-                "action": "subscribe",
-                "channel": "order_book",
-                "market": "btc-updown-5m",
+                "type": "subscribe",
+                "channel": "market",
+                "assets_id": "btc-updown-5m",
             }
         )
         await self.ws.send_str(subscribe_message.decode())
@@ -95,6 +101,7 @@ class PolymarketCLOBWebSocket:
         async for msg in self.ws:
             if msg.type == aiohttp.WSMsgType.TEXT:
                 data = orjson.loads(msg.data)
+                logger.debug("Raw WS message received", data_type=data.get("type", "unknown"))
                 self._handle_message(data)
                 self.last_message_ts = time.monotonic()
             elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):

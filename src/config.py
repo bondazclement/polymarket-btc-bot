@@ -46,8 +46,11 @@ class Config:
     DELTA_MIN: float = 0.0003
     EDGE_BUFFER: float = 0.05
     MAX_TOKEN_PRICE: float = 0.60
+    POLYMARKET_CLOB_WS_URL: str = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
     KELLY_FRACTION: float = 0.25
     STOP_LOSS_PCT: float = 0.20
+    BOOTSTRAP_WIN_RATE: float = 0.65
+    RESOLUTION_WAIT_SECONDS: float = 15.0
 
 
 # Load configuration from environment variables

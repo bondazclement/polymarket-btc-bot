@@ -121,9 +121,14 @@ class TakerSelectiveStrategy:
         if not should_execute:
             return None
 
+        # Use bootstrap win rate until we have enough history
+        win_rate = state.get_win_rate()
+        if state.total_trades < 20:
+            win_rate = max(win_rate, CONFIG.BOOTSTRAP_WIN_RATE)
+
         # Calculate the Kelly bet size
         bet_size = calc_kelly_bet(
-            win_rate=state.get_win_rate(),
+            win_rate=win_rate,
             token_price=best_ask,
             bankroll=state.bankroll,
             fraction=CONFIG.KELLY_FRACTION,

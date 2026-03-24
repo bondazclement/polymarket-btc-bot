@@ -36,8 +36,19 @@ def mock_state():
     )
 
 
+@pytest.fixture
+def mock_market_data():
+    """Fixture to create a mock MarketData."""
+    market = MagicMock()
+    market.up_token_id = "up_id"
+    market.down_token_id = "down_id"
+    market.condition_id = "0xcondition123"
+    market.slug = "btc-updown-5m-1710000000"
+    return market
+
+
 @pytest.mark.asyncio
-async def test_trading_loop_dry_run(mock_feed_manager, mock_state):
+async def test_trading_loop_dry_run(mock_feed_manager, mock_state, mock_market_data):
     """Test the trading loop in dry-run mode."""
     trading_loop = TradingLoop(state=mock_state, mode="dry-run")
 
@@ -60,7 +71,7 @@ async def test_trading_loop_dry_run(mock_feed_manager, mock_state):
     with patch("src.engine.loop.get_time_remaining", return_value=1.0), \
          patch("src.engine.loop.get_window_start", return_value=1710000000), \
          patch("src.engine.loop.get_current_slug", return_value="btc-updown-5m-1710000000"), \
-         patch("src.engine.loop.resolve_token_ids", new_callable=AsyncMock, return_value=("up_id", "down_id")), \
+         patch("src.engine.loop.resolve_market_data", new_callable=AsyncMock, return_value=mock_market_data), \
          patch("src.engine.loop.sleep_until", new_callable=AsyncMock):
         await trading_loop._run_window()
 

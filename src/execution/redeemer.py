@@ -52,6 +52,8 @@ async def redeem_if_resolved(
     client: PolymarketClient,
     slug: str,
     condition_id: str,
+    entry_price: float = 0.0,
+    entry_size: float = 0.0,
 ) -> float | None:
     """Redeem tokens if the market is resolved.
 
@@ -63,9 +65,11 @@ async def redeem_if_resolved(
         client: PolymarketClient wrapper instance.
         slug: Market slug identifier.
         condition_id: Condition ID for the market.
+        entry_price: Price at which the token was bought.
+        entry_size: Size of the order in USDC.
 
     Returns:
-        Amount redeemed in USDC or None if redemption is not available.
+        P&L amount in USDC or None if redemption is not available.
     """
     resolved = await _is_market_resolved(slug)
     if not resolved:
@@ -82,9 +86,21 @@ async def redeem_if_resolved(
                 condition_id=condition_id,
                 result=result,
             )
-            # result is typically a tx hash; the actual profit is determined
-            # by the token payout (1.00$ per winning token minus cost)
-            return 1.0
+
+            # Calculate actual P&L based on entry price and size
+            if entry_price > 0 and entry_size > 0:
+                num_tokens = entry_size / entry_price
+                pnl = (1.0 - entry_price) * num_tokens
+                logger.info(
+                    "P&L calculated",
+                    pnl=pnl,
+                    entry_price=entry_price,
+                    num_tokens=num_tokens,
+                )
+                return pnl
+            else:
+                logger.warning("Entry data not available, returning estimate")
+                return 0.0
         except Exception as e:
             logger.error(
                 "Redeem failed",

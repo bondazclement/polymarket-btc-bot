@@ -69,13 +69,19 @@ class PolymarketRTDS:
                 await self._listen()
             except Exception as e:
                 logger.error("Polymarket RTDS WebSocket error", error=str(e))
-                if self._session:
+            finally:
+                if self._session and not self._session.closed:
                     await self._session.close()
-                    self._session = None
-                await self._reconnect()
+                self._session = None
+                self.ws = None
+            await self._reconnect()
 
     async def _subscribe(self) -> None:
         """Subscribe to the Chainlink BTC/USD price feed."""
+        # TODO: Validate subscribe message format and response types
+        # against live Polymarket WebSocket during first dry-run.
+        # Current format is based on documentation review;
+        # may need adjustment based on actual API responses.
         if self.ws is None:
             return
 
@@ -97,6 +103,7 @@ class PolymarketRTDS:
         async for msg in self.ws:
             if msg.type == aiohttp.WSMsgType.TEXT:
                 data = orjson.loads(msg.data)
+                logger.debug("Raw WS message received", data_type=data.get("type", "unknown"))
                 self._handle_message(data)
                 self.last_message_ts = time.monotonic()
             elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
