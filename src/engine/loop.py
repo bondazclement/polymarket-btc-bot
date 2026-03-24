@@ -16,7 +16,7 @@ from src.engine.state import BotState
 from src.execution.clob_client import PolymarketClient
 from src.execution.order_builder import build_and_post_order
 from src.execution.redeemer import redeem_if_resolved
-from src.execution.slug_resolver import get_current_slug, resolve_token_ids
+from src.execution.slug_resolver import get_current_slug, resolve_market_data
 from src.feeds.feed_manager import FeedManager
 from src.signal.scorer import SignalScorer
 from src.strategy.taker_selective import TakerSelectiveStrategy, TradeDecision
@@ -80,15 +80,21 @@ class TradingLoop:
 
         logger.info("Window started", price_to_beat=price_to_beat)
 
-        # Resolve the slug and token IDs
+        # Resolve slug, token IDs, and condition ID
         slug = get_current_slug()
-        up_token_id, down_token_id = await resolve_token_ids(slug)
-        if not up_token_id or not down_token_id:
-            logger.error("Failed to resolve token IDs")
+        market_data = await resolve_market_data(slug)
+        if market_data is None:
+            logger.error("Failed to resolve market data", slug=slug)
             return
 
+        up_token_id = market_data.up_token_id
+        down_token_id = market_data.down_token_id
+        condition_id = market_data.condition_id
+
         logger.info(
-            "Token IDs resolved",
+            "Market data resolved",
+            slug=slug,
+            condition_id=condition_id,
             up_token_id=up_token_id,
             down_token_id=down_token_id,
         )
@@ -133,16 +139,18 @@ class TradingLoop:
             await sleep_until(5)
             await self.clob_client.cancel_all()
 
-        # Wait for resolution (T+10 seconds after window close)
+        # Wait for resolution
         remaining = get_time_remaining()
-        await asyncio.sleep(remaining + 10)
+        await asyncio.sleep(remaining + CONFIG.RESOLUTION_WAIT_SECONDS)
 
         # Auto-redeem
         if self.mode != "dry-run":
             amount = await redeem_if_resolved(
                 client=self.clob_client,
                 slug=slug,
-                condition_id="",
+                condition_id=condition_id,
+                entry_price=trade_decision.price if trade_decision else 0.0,
+                entry_size=trade_decision.size if trade_decision else 0.0,
             )
             if amount is not None:
                 is_win = amount > 0
