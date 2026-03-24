@@ -51,8 +51,6 @@ class FeedManager:
 
     async def stop_all(self) -> None:
         """Stop all WebSocket feeds gracefully."""
-        # Note: picows does not provide a direct method to close the WebSocket,
-        # so we rely on the feeds to handle disconnections gracefully.
         logger.info("Stopping all WebSocket feeds")
 
     async def health_check(self) -> None:

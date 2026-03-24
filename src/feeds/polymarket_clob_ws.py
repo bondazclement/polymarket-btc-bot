@@ -8,10 +8,10 @@ the best bid and ask prices for each token.
 
 import asyncio
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
+import aiohttp
 import orjson
-import picows
 from structlog import get_logger
 
 from src.config import CONFIG
@@ -46,25 +46,31 @@ class PolymarketCLOBWebSocket:
     def __init__(self) -> None:
         """Initialize the Polymarket CLOB WebSocket client."""
         self.ws_url: str = f"{CONFIG.POLYMARKET_CLOB_URL}/ws/market"
-        self.order_books: Dict[str, Dict[str, OrderBookLevel]] = {}
+        self.order_books: Dict[str, Dict[str, List[OrderBookLevel]]] = {}
         self.reconnect_attempts: int = 0
         self.max_reconnect_delay: int = 30
-        self.ws: Optional[picows.WebSocket] = None
+        self.ws: aiohttp.ClientWebSocketResponse | None = None
+        self._session: aiohttp.ClientSession | None = None
 
     async def connect(self) -> None:
         """Connect to the Polymarket CLOB WebSocket stream."""
         while True:
             try:
-                self.ws = picows.WebSocket(self.ws_url)
-                await self.ws.connect()
+                session = aiohttp.ClientSession()
+                self._session = session
+                self.ws = await session.ws_connect(self.ws_url)
                 logger.info("Connected to Polymarket CLOB WebSocket")
-                await self.subscribe()
-                await self.listen()
+                self.reconnect_attempts = 0
+                await self._subscribe()
+                await self._listen()
             except Exception as e:
                 logger.error("Polymarket CLOB WebSocket error", error=str(e))
-                await self.reconnect()
+                if self._session:
+                    await self._session.close()
+                    self._session = None
+                await self._reconnect()
 
-    async def subscribe(self) -> None:
+    async def _subscribe(self) -> None:
         """Subscribe to the order book for the active market."""
         if self.ws is None:
             return
@@ -76,24 +82,22 @@ class PolymarketCLOBWebSocket:
                 "market": "btc-updown-5m",
             }
         )
-        await self.ws.send(subscribe_message)
+        await self.ws.send_str(subscribe_message.decode())
         logger.info("Subscribed to Polymarket CLOB order book")
 
-    async def listen(self) -> None:
+    async def _listen(self) -> None:
         """Listen for incoming messages from the WebSocket."""
         if self.ws is None:
             return
 
-        while True:
-            try:
-                message = await self.ws.recv()
-                data = orjson.loads(message)
-                await self.handle_message(data)
-            except Exception as e:
-                logger.error("Error parsing Polymarket CLOB message", error=str(e))
+        async for msg in self.ws:
+            if msg.type == aiohttp.WSMsgType.TEXT:
+                data = orjson.loads(msg.data)
+                self._handle_message(data)
+            elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
                 break
 
-    async def handle_message(self, data: dict) -> None:
+    def _handle_message(self, data: dict) -> None:
         """Handle incoming messages from the WebSocket.
 
         Args:
@@ -119,7 +123,7 @@ class PolymarketCLOBWebSocket:
         except (KeyError, ValueError) as e:
             logger.error("Failed to handle Polymarket CLOB message", error=str(e))
 
-    async def reconnect(self) -> None:
+    async def _reconnect(self) -> None:
         """Reconnect with exponential backoff."""
         delay = min(2**self.reconnect_attempts, self.max_reconnect_delay)
         logger.info("Reconnecting to Polymarket CLOB WebSocket", delay=delay)

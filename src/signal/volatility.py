@@ -5,14 +5,16 @@ This module provides functions to calculate the rolling volatility of BTC prices
 using numpy for vectorized operations.
 """
 
-import numpy as np
+import time
 from collections import deque
+
+import numpy as np
 
 from src.feeds.binance_ws import Tick
 
 
 def calc_rolling_volatility(prices: deque[Tick], window_seconds: int) -> float:
-    """Calculate the rolling volatility of BTC prices.
+    """Calculate the rolling volatility of BTC prices within a time window.
 
     Args:
         prices: Deque of Tick objects containing price data.
@@ -24,17 +26,15 @@ def calc_rolling_volatility(prices: deque[Tick], window_seconds: int) -> float:
     if len(prices) < 2:
         return 0.0
 
-    # Convert deque of Tick objects to numpy array of prices
-    price_array = np.array([tick.price for tick in prices])
+    cutoff_ms = int((time.time() - window_seconds) * 1000)
+    recent_prices = [t.price for t in prices if t.timestamp >= cutoff_ms]
 
-    # Calculate log returns
+    if len(recent_prices) < 2:
+        return 0.0
+
+    price_array = np.array(recent_prices)
     log_returns = np.diff(np.log(price_array))
-
-    # Calculate standard deviation of log returns
     std_log_returns = np.std(log_returns)
 
-    # Annualize the volatility
     annualization_factor = np.sqrt((3600 * 24 * 365) / window_seconds)
-    annualized_volatility = std_log_returns * annualization_factor
-
-    return annualized_volatility
+    return float(std_log_returns * annualization_factor)

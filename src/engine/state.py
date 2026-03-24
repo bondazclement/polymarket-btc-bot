@@ -72,17 +72,16 @@ class BotState:
             return 0.0
         return (edge / (1.0 / price - 1.0)) * 0.25
 
-    def is_stop_loss_hit(self, current_price: float, entry_price: float) -> bool:
-        """Check if the stop loss threshold has been hit.
+    def is_stop_loss_hit(self, initial_bankroll: float = 100.0) -> bool:
+        """Check if the stop loss threshold has been hit based on bankroll drawdown.
 
         Args:
-            current_price: Current token price.
-            entry_price: Entry price of the token.
+            initial_bankroll: Initial bankroll to compare against (default: 100.0).
 
         Returns:
             True if stop loss is hit, False otherwise.
         """
-        if entry_price == 0:
+        if initial_bankroll <= 0:
             return False
-        loss_pct = (entry_price - current_price) / entry_price
+        loss_pct = (initial_bankroll - self.bankroll) / initial_bankroll
         return loss_pct >= 0.20

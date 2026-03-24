@@ -37,7 +37,7 @@ def should_trade(signal: SignalResult, best_ask: float, state: BotState) -> tupl
         return False, "There is already an open position"
 
     # Check if the stop loss has been hit
-    if state.current_position is not None and state.is_stop_loss_hit(best_ask, state.current_position):
+    if state.is_stop_loss_hit():
         return False, "Stop loss has been hit"
 
     # All conditions are met, proceed with the trade

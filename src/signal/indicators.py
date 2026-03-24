@@ -8,6 +8,25 @@ using numpy for vectorized operations.
 import numpy as np
 
 
+def calc_ema(prices: np.ndarray, period: int) -> np.ndarray:
+    """Calculate the Exponential Moving Average (EMA) for the given prices.
+
+    Args:
+        prices: Numpy array of price data.
+        period: Period for EMA calculation.
+
+    Returns:
+        Numpy array of EMA values.
+    """
+    alpha = 2.0 / (period + 1)
+    result = np.empty_like(prices)
+    result[0] = prices[0]
+    # EMA is intrinsically recursive; a scalar loop is acceptable here
+    for i in range(1, len(prices)):
+        result[i] = alpha * prices[i] + (1 - alpha) * result[i - 1]
+    return result
+
+
 def calc_rsi(prices: np.ndarray, period: int = 14) -> float:
     """Calculate the Relative Strength Index (RSI) for the given prices.
 
@@ -21,34 +40,18 @@ def calc_rsi(prices: np.ndarray, period: int = 14) -> float:
     if len(prices) < period + 1:
         return 50.0
 
-    # Calculate price changes
     deltas = np.diff(prices)
+    gains = np.where(deltas > 0, deltas, 0.0)
+    losses = np.where(deltas < 0, -deltas, 0.0)
 
-    # Separate gains and losses
-    gains = deltas[deltas > 0]
-    losses = -deltas[deltas < 0]
-
-    # Calculate average gains and losses
     avg_gain = np.mean(gains[:period])
     avg_loss = np.mean(losses[:period])
 
-    # Smooth the averages
-    for i in range(period, len(deltas)):
-        delta = deltas[i]
-        if delta > 0:
-            avg_gain = (avg_gain * (period - 1) + delta) / period
-            avg_loss = (avg_loss * (period - 1)) / period
-        else:
-            avg_gain = (avg_gain * (period - 1)) / period
-            avg_loss = (avg_loss * (period - 1) - delta) / period
+    if avg_loss == 0:
+        return 100.0
 
-    # Calculate Relative Strength (RS)
-    rs = avg_gain / avg_loss if avg_loss != 0 else 0.0
-
-    # Calculate RSI
-    rsi = 100.0 - (100.0 / (1.0 + rs))
-
-    return rsi
+    rs = avg_gain / avg_loss
+    return float(100.0 - (100.0 / (1.0 + rs)))
 
 
 def calc_ema_spread(prices: np.ndarray, fast: int = 5, slow: int = 20) -> float:
@@ -65,23 +68,12 @@ def calc_ema_spread(prices: np.ndarray, fast: int = 5, slow: int = 20) -> float:
     if len(prices) < max(fast, slow):
         return 0.0
 
-    # Calculate fast EMA
-    ema_fast = np.zeros_like(prices)
-    ema_fast[fast - 1] = np.mean(prices[:fast])
-    for i in range(fast, len(prices)):
-        ema_fast[i] = (prices[i] * (2.0 / (fast + 1))) + (ema_fast[i - 1] * (1 - (2.0 / (fast + 1))))
+    ema_fast = calc_ema(prices, fast)
+    ema_slow = calc_ema(prices, slow)
 
-    # Calculate slow EMA
-    ema_slow = np.zeros_like(prices)
-    ema_slow[slow - 1] = np.mean(prices[:slow])
-    for i in range(slow, len(prices)):
-        ema_slow[i] = (prices[i] * (2.0 / (slow + 1))) + (ema_slow[i - 1] * (1 - (2.0 / (slow + 1))))
-
-    # Calculate spread
     spread = ema_fast[-1] - ema_slow[-1]
 
-    # Normalize spread by the average price
     avg_price = np.mean(prices)
-    normalized_spread = spread / avg_price if avg_price != 0 else 0.0
+    normalized_spread = float(spread / avg_price) if avg_price != 0 else 0.0
 
     return normalized_spread

@@ -11,11 +11,10 @@ from typing import Optional
 from structlog import get_logger
 
 from src.config import CONFIG
-from src.engine.clock import get_window_start, sleep_until
+from src.engine.clock import get_time_remaining, get_window_start, sleep_until
 from src.engine.state import BotState
 from src.execution.clob_client import PolymarketClient
-from src.execution.order_builder import build_order
-from src.execution.redeemer import redeem_if_resolved
+from src.execution.order_builder import build_and_post_order
 from src.execution.slug_resolver import get_current_slug, resolve_token_ids
 from src.feeds.feed_manager import FeedManager
 from src.signal.scorer import SignalScorer
@@ -52,21 +51,7 @@ class TradingLoop:
         self.mode = mode
 
     async def run(self) -> None:
-        """Run the main trading loop indefinitely.
-
-        This method executes one iteration per 5-minute trading window,
-        performing the following steps:
-        1. Wait for the start of the window (T=0).
-        2. Record the opening Chainlink price.
-        3. Resolve the slug and token IDs.
-        4. Wait until T-30 seconds.
-        5. Evaluate the signal using TakerSelectiveStrategy.
-        6. If a trade is decided, place the order.
-        7. Monitor execution until T-5 seconds, cancel if not filled.
-        8. Wait for resolution (T+10 seconds).
-        9. Auto-redeem.
-        10. Log the result and update the state.
-        """
+        """Run the main trading loop indefinitely."""
         await self.feeds.start_all()
 
         while True:
@@ -78,12 +63,15 @@ class TradingLoop:
 
     async def _run_window(self) -> None:
         """Run a single trading window iteration."""
-        # Wait for the start of the window
-        window_start = get_window_start()
-        logger.info("Waiting for window start", window_start=window_start)
-        await sleep_until(300)
+        # Wait for the start of the next window
+        remaining = get_time_remaining()
+        if remaining > 5:
+            await asyncio.sleep(remaining + 1)
 
-        # Record the opening Chainlink price
+        # T=0 : Record the opening Chainlink price
+        window_start = get_window_start()
+        logger.info("New window started", window_start=window_start)
+
         price_to_beat = self.feeds.polymarket_rtds_feed.get_price_to_beat()
         if price_to_beat is None:
             logger.error("Failed to get opening Chainlink price")
@@ -98,14 +86,22 @@ class TradingLoop:
             logger.error("Failed to resolve token IDs")
             return
 
-        logger.info("Token IDs resolved", up_token_id=up_token_id, down_token_id=down_token_id)
+        logger.info(
+            "Token IDs resolved",
+            up_token_id=up_token_id,
+            down_token_id=down_token_id,
+        )
 
-        # Wait until T-30 seconds
+        # Wait until T-30s (30 seconds before window close)
         await sleep_until(30)
 
         # Evaluate the signal
         trade_decision: Optional[TradeDecision] = await self.strategy.evaluate_window(
-            feeds=self.feeds, signal_scorer=self.signal_scorer, state=self.state
+            feeds=self.feeds,
+            signal_scorer=self.signal_scorer,
+            state=self.state,
+            up_token_id=up_token_id,
+            down_token_id=down_token_id,
         )
 
         if trade_decision is None:
@@ -118,48 +114,27 @@ class TradingLoop:
         if self.mode == "dry-run":
             logger.info("Dry-run mode: would place order", decision=trade_decision)
         else:
-            order = await build_order(
-                client=self.clob_client.client,
+            success = await build_and_post_order(
+                client=self.clob_client,
                 token_id=trade_decision.token_id,
                 side=trade_decision.side,
                 price=trade_decision.price,
                 size=trade_decision.size,
             )
 
-            if order is None:
-                logger.error("Failed to build order")
-                return
-
-            placed = await self.clob_client.place_order(order)
-            if not placed:
+            if not success:
                 logger.error("Failed to place order")
                 return
 
-            logger.info("Order placed successfully", order_id=order.order_id)
+            logger.info("Order placed successfully")
 
-            # Monitor execution until T-5 seconds
+            # Wait until T-5s, then cancel all open orders as safety net
             await sleep_until(5)
+            await self.clob_client.cancel_all()
 
-            # Cancel the order if not filled
-            if not order.is_filled:
-                cancelled = await self.clob_client.cancel_order(order.order_id)
-                if cancelled:
-                    logger.info("Order cancelled successfully", order_id=order.order_id)
-                else:
-                    logger.error("Failed to cancel order", order_id=order.order_id)
-
-        # Wait for resolution (T+10 seconds)
-        await asyncio.sleep(10)
-
-        # Auto-redeem
-        if self.state.current_position:
-            amount = await redeem_if_resolved(self.clob_client.client, self.state.current_position)
-            if amount is not None:
-                logger.info("Tokens redeemed successfully", amount=amount)
-                self.state.update_after_trade(amount, True)
-            else:
-                logger.error("Failed to redeem tokens")
-                self.state.update_after_trade(0.0, False)
+        # Wait for resolution (T+10 seconds after window close)
+        remaining = get_time_remaining()
+        await asyncio.sleep(remaining + 10)
 
         # Log the result and update the state
         logger.info("Window completed", state=self.state)
