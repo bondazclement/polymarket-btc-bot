@@ -51,17 +51,17 @@ def test_should_trade_low_confidence(mock_state):
 
 def test_should_trade_stop_loss_hit(mock_state):
     """Test should_trade with a stop loss hit."""
-    mock_state.current_position = 0.8
+    mock_state.bankroll = 70.0  # 30% loss from initial 100 > 20% threshold
     signal = SignalResult(direction="UP", confidence=0.7, suggested_side="Up")
     best_ask = 0.5
     should_execute, reason = should_trade(signal, best_ask, mock_state)
     assert not should_execute
-    assert reason == "There is already an open position"
+    assert reason == "Stop loss has been hit"
 
 
 def test_should_trade_open_position(mock_state):
     """Test should_trade with an open position."""
-    mock_state.current_position = 1.0
+    mock_state.current_position = "some_token_id"
     signal = SignalResult(direction="UP", confidence=0.7, suggested_side="Up")
     best_ask = 0.5
     should_execute, reason = should_trade(signal, best_ask, mock_state)

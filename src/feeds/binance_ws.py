@@ -10,8 +10,8 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Deque
 
+import aiohttp
 import orjson
-import picows
 from structlog import get_logger
 
 from src.config import CONFIG
@@ -53,37 +53,41 @@ class BinanceWebSocket:
         self.tick_buffer: Deque[Tick] = deque(maxlen=600)
         self.reconnect_attempts: int = 0
         self.max_reconnect_delay: int = 30
-        self.ws: picows.WebSocket | None = None
+        self.ws: aiohttp.ClientWebSocketResponse | None = None
+        self._session: aiohttp.ClientSession | None = None
 
     async def connect(self) -> None:
         """Connect to the Binance WebSocket stream."""
         while True:
             try:
-                self.ws = picows.WebSocket(self.ws_url)
-                await self.ws.connect()
+                session = aiohttp.ClientSession()
+                self._session = session
+                self.ws = await session.ws_connect(self.ws_url)
                 logger.info("Connected to Binance WebSocket")
-                await self.listen()
+                self.reconnect_attempts = 0
+                await self._listen()
             except Exception as e:
                 logger.error("Binance WebSocket error", error=str(e))
-                await self.reconnect()
+                if self._session:
+                    await self._session.close()
+                    self._session = None
+                await self._reconnect()
 
-    async def listen(self) -> None:
+    async def _listen(self) -> None:
         """Listen for incoming messages from the WebSocket."""
         if self.ws is None:
             return
 
-        while True:
-            try:
-                message = await self.ws.recv()
-                data = orjson.loads(message)
-                tick = self.parse_tick(data)
+        async for msg in self.ws:
+            if msg.type == aiohttp.WSMsgType.TEXT:
+                data = orjson.loads(msg.data)
+                tick = self._parse_tick(data)
                 if tick:
                     self.tick_buffer.append(tick)
-            except Exception as e:
-                logger.error("Error parsing Binance message", error=str(e))
+            elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
                 break
 
-    def parse_tick(self, data: dict) -> Tick | None:
+    def _parse_tick(self, data: dict) -> Tick | None:
         """Parse a Binance trade message into a Tick object.
 
         Args:
@@ -103,7 +107,7 @@ class BinanceWebSocket:
             logger.error("Failed to parse Binance tick", error=str(e))
             return None
 
-    async def reconnect(self) -> None:
+    async def _reconnect(self) -> None:
         """Reconnect with exponential backoff."""
         delay = min(2**self.reconnect_attempts, self.max_reconnect_delay)
         logger.info("Reconnecting to Binance WebSocket", delay=delay)
