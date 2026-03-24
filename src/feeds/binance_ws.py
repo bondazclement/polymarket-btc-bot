@@ -6,6 +6,7 @@ parses incoming messages, and maintains a buffer of recent ticks.
 """
 
 import asyncio
+import time
 from collections import deque
 from dataclasses import dataclass
 from typing import Deque
@@ -55,6 +56,7 @@ class BinanceWebSocket:
         self.max_reconnect_delay: int = 30
         self.ws: aiohttp.ClientWebSocketResponse | None = None
         self._session: aiohttp.ClientSession | None = None
+        self.last_message_ts: float = 0.0
 
     async def connect(self) -> None:
         """Connect to the Binance WebSocket stream."""
@@ -84,6 +86,7 @@ class BinanceWebSocket:
                 tick = self._parse_tick(data)
                 if tick:
                     self.tick_buffer.append(tick)
+                    self.last_message_ts = time.monotonic()
             elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
                 break
 
@@ -113,6 +116,14 @@ class BinanceWebSocket:
         logger.info("Reconnecting to Binance WebSocket", delay=delay)
         await asyncio.sleep(delay)
         self.reconnect_attempts += 1
+
+    def get_last_message_ts(self) -> float:
+        """Get the timestamp of the last successfully parsed message.
+
+        Returns:
+            Monotonic timestamp of last message, or 0.0 if none received.
+        """
+        return self.last_message_ts
 
     def get_latest_price(self) -> float:
         """Get the latest trade price.

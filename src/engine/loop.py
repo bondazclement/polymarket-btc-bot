@@ -15,6 +15,7 @@ from src.engine.clock import get_time_remaining, get_window_start, sleep_until
 from src.engine.state import BotState
 from src.execution.clob_client import PolymarketClient
 from src.execution.order_builder import build_and_post_order
+from src.execution.redeemer import redeem_if_resolved
 from src.execution.slug_resolver import get_current_slug, resolve_token_ids
 from src.feeds.feed_manager import FeedManager
 from src.signal.scorer import SignalScorer
@@ -136,5 +137,32 @@ class TradingLoop:
         remaining = get_time_remaining()
         await asyncio.sleep(remaining + 10)
 
-        # Log the result and update the state
-        logger.info("Window completed", state=self.state)
+        # Auto-redeem
+        if self.mode != "dry-run":
+            amount = await redeem_if_resolved(
+                client=self.clob_client,
+                slug=slug,
+                condition_id="",
+            )
+            if amount is not None:
+                is_win = amount > 0
+                self.state.update_after_trade(amount, is_win)
+                self.state.current_position = None
+                logger.info(
+                    "Trade settled",
+                    pnl=amount,
+                    is_win=is_win,
+                    bankroll=self.state.bankroll,
+                    win_rate=self.state.get_win_rate(),
+                )
+            else:
+                logger.warning("Redemption not available yet, will retry next cycle")
+        else:
+            logger.info("Dry-run: skipping redemption")
+
+        logger.info(
+            "Window completed",
+            bankroll=self.state.bankroll,
+            total_trades=self.state.total_trades,
+            win_rate=self.state.get_win_rate(),
+        )

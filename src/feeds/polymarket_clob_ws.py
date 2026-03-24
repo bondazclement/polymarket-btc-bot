@@ -7,6 +7,7 @@ the best bid and ask prices for each token.
 """
 
 import asyncio
+import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
@@ -51,6 +52,7 @@ class PolymarketCLOBWebSocket:
         self.max_reconnect_delay: int = 30
         self.ws: aiohttp.ClientWebSocketResponse | None = None
         self._session: aiohttp.ClientSession | None = None
+        self.last_message_ts: float = 0.0
 
     async def connect(self) -> None:
         """Connect to the Polymarket CLOB WebSocket stream."""
@@ -94,6 +96,7 @@ class PolymarketCLOBWebSocket:
             if msg.type == aiohttp.WSMsgType.TEXT:
                 data = orjson.loads(msg.data)
                 self._handle_message(data)
+                self.last_message_ts = time.monotonic()
             elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
                 break
 
@@ -129,6 +132,14 @@ class PolymarketCLOBWebSocket:
         logger.info("Reconnecting to Polymarket CLOB WebSocket", delay=delay)
         await asyncio.sleep(delay)
         self.reconnect_attempts += 1
+
+    def get_last_message_ts(self) -> float:
+        """Get the timestamp of the last successfully parsed message.
+
+        Returns:
+            Monotonic timestamp of last message, or 0.0 if none received.
+        """
+        return self.last_message_ts
 
     def get_best_ask(self, token_id: str) -> Optional[float]:
         """Get the best ask price for a token.
