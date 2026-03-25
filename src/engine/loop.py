@@ -149,6 +149,7 @@ class TradingLoop:
                 client=self.clob_client,
                 slug=slug,
                 condition_id=condition_id,
+                side=trade_decision.side if trade_decision else "",
                 entry_price=trade_decision.price if trade_decision else 0.0,
                 entry_size=trade_decision.size if trade_decision else 0.0,
             )

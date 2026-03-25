@@ -21,7 +21,7 @@ def calc_rolling_volatility(prices: deque[Tick], window_seconds: int) -> float:
         window_seconds: Time window in seconds for volatility calculation.
 
     Returns:
-        Annualized volatility as a float.
+        Hourly volatility as a float (suitable for GBM with t in hours).
     """
     if len(prices) < 2:
         return 0.0
@@ -36,5 +36,5 @@ def calc_rolling_volatility(prices: deque[Tick], window_seconds: int) -> float:
     log_returns = np.diff(np.log(price_array))
     std_log_returns = np.std(log_returns)
 
-    annualization_factor = np.sqrt((3600 * 24 * 365) / window_seconds)
-    return float(std_log_returns * annualization_factor)
+    hourly_factor = np.sqrt(3600 / window_seconds)
+    return float(std_log_returns * hourly_factor)
