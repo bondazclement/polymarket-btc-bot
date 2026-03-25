@@ -65,7 +65,13 @@ class FeedManager:
         and updates the health status accordingly.
         """
         now = time.monotonic()
-        stale_threshold = 30.0
+
+        # Per-feed stale thresholds: CLOB order book updates are less frequent
+        thresholds: Dict[str, float] = {
+            "binance": 30.0,
+            "polymarket_rtds": 30.0,
+            "polymarket_clob": 120.0,
+        }
 
         feeds: Dict[str, Any] = {
             "binance": self.binance_feed,
@@ -78,7 +84,7 @@ class FeedManager:
             if last_ts == 0.0:
                 self.health_status[name] = False
             else:
-                self.health_status[name] = (now - last_ts) < stale_threshold
+                self.health_status[name] = (now - last_ts) < thresholds[name]
 
         logger.info("Health check completed", status=self.health_status)
 

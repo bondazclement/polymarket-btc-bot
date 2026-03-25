@@ -9,8 +9,12 @@ from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
+from structlog import get_logger
 
 from src.config import CONFIG
+
+
+logger = get_logger(__name__)
 from src.engine.clock import get_time_remaining
 from src.engine.state import BotState
 from src.feeds.feed_manager import FeedManager
@@ -70,6 +74,7 @@ class TakerSelectiveStrategy:
         price_to_beat = feeds.polymarket_rtds_feed.get_price_to_beat()
 
         if current_price == 0.0 or price_to_beat is None:
+            logger.info("Skip: missing price data", current_price=current_price, price_to_beat=price_to_beat)
             return None
 
         # Calculate delta
@@ -84,6 +89,7 @@ class TakerSelectiveStrategy:
 
         # Need enough ticks for indicators
         if len(tick_buffer) < 20:
+            logger.info("Skip: insufficient ticks", tick_count=len(tick_buffer))
             return None
 
         # Extract prices as numpy array for indicators
@@ -104,6 +110,18 @@ class TakerSelectiveStrategy:
             time_remaining=time_remaining,
         )
 
+        logger.info(
+            "Signal evaluated",
+            delta=delta,
+            volatility_hourly=volatility_hourly,
+            gbm_prob=gbm_prob,
+            rsi=rsi,
+            ema_spread=ema_spread,
+            time_remaining=time_remaining,
+            direction=signal.direction,
+            confidence=signal.confidence,
+        )
+
         # Determine the best ask price based on the signal direction
         if signal.direction == "UP":
             best_ask = feeds.polymarket_clob_feed.get_best_ask(up_token_id)
@@ -113,12 +131,14 @@ class TakerSelectiveStrategy:
             best_ask = 0.0
 
         if best_ask is None:
+            logger.info("Skip: no best_ask available", direction=signal.direction)
             return None
 
         # Check if the trade should be executed
         should_execute, reason = should_trade(signal=signal, best_ask=best_ask, state=state)
 
         if not should_execute:
+            logger.info("Skip: filter rejected", reason=reason, best_ask=best_ask, direction=signal.direction)
             return None
 
         # Use bootstrap win rate until we have enough history
@@ -135,6 +155,7 @@ class TakerSelectiveStrategy:
         )
 
         if bet_size <= 0:
+            logger.info("Skip: Kelly bet_size <= 0", win_rate=win_rate, best_ask=best_ask)
             return None
 
         # Create the trade decision

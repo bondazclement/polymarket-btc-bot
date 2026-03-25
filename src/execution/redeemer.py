@@ -6,6 +6,7 @@ via the py-clob-client REST API and Gamma API for resolution checks.
 """
 
 import asyncio
+from typing import Optional
 
 import aiohttp
 import orjson
@@ -48,23 +49,67 @@ async def _is_market_resolved(slug: str) -> bool:
         return False
 
 
+async def _get_winning_side(slug: str) -> Optional[str]:
+    """Determine the winning side from Gamma API outcomePrices.
+
+    Args:
+        slug: Market slug identifier.
+
+    Returns:
+        "Up" or "Down" if determinable, None otherwise.
+    """
+    url = f"{GAMMA_API_URL}/events?slug={slug}"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    return None
+                data = orjson.loads(await resp.read())
+                if not data:
+                    return None
+                event = data[0] if isinstance(data, list) else data
+                markets = event.get("markets", [])
+                if not markets:
+                    return None
+
+                market = markets[0]
+                outcome_prices = market.get("outcomePrices", [])
+                outcomes = market.get("outcomes", [])
+
+                if not outcome_prices or not outcomes:
+                    return None
+
+                # outcomePrices are strings like "1" or "0"
+                for i, price_str in enumerate(outcome_prices):
+                    price = float(price_str)
+                    if price >= 0.99 and i < len(outcomes):
+                        return str(outcomes[i])
+
+                return None
+    except Exception as e:
+        logger.error("Failed to get winning side", slug=slug, error=str(e))
+        return None
+
+
 async def redeem_if_resolved(
     client: PolymarketClient,
     slug: str,
     condition_id: str,
+    side: str = "",
     entry_price: float = 0.0,
     entry_size: float = 0.0,
 ) -> float | None:
     """Redeem tokens if the market is resolved.
 
-    Checks the Gamma API for market resolution status, then calls
-    client.redeem() via py-clob-client. Retries up to 2 times with
-    3s backoff to account for on-chain settlement delays.
+    Checks the Gamma API for market resolution status, determines win/loss
+    via outcomePrices, then calls client.redeem() via py-clob-client.
+    Retries up to 2 times with 3s backoff for on-chain settlement delays.
 
     Args:
         client: PolymarketClient wrapper instance.
         slug: Market slug identifier.
         condition_id: Condition ID for the market.
+        side: Side we bought ("Up" or "Down").
         entry_price: Price at which the token was bought.
         entry_size: Size of the order in USDC.
 
@@ -75,6 +120,18 @@ async def redeem_if_resolved(
     if not resolved:
         logger.info("Market not resolved yet", slug=slug)
         return None
+
+    # Determine if we won or lost
+    winning_side = await _get_winning_side(slug)
+    is_win = winning_side is not None and winning_side == side
+
+    logger.info(
+        "Market resolved",
+        slug=slug,
+        winning_side=winning_side,
+        our_side=side,
+        is_win=is_win,
+    )
 
     max_retries = 2
     for attempt in range(max_retries):
@@ -87,13 +144,19 @@ async def redeem_if_resolved(
                 result=result,
             )
 
-            # Calculate actual P&L based on entry price and size
+            # Calculate actual P&L based on win/loss
             if entry_price > 0 and entry_size > 0:
                 num_tokens = entry_size / entry_price
-                pnl = (1.0 - entry_price) * num_tokens
+                if is_win:
+                    # Token pays $1.00 on win
+                    pnl = (1.0 - entry_price) * num_tokens
+                else:
+                    # Token pays $0.00 on loss — we lose our entire entry
+                    pnl = -entry_size
                 logger.info(
                     "P&L calculated",
                     pnl=pnl,
+                    is_win=is_win,
                     entry_price=entry_price,
                     num_tokens=num_tokens,
                 )
