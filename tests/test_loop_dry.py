@@ -50,6 +50,17 @@ def mock_market_data():
     return market
 
 
+def test_get_opening_chainlink_price_falls_back_to_current_price_attr(mock_state):
+    """TradingLoop should support legacy RTDS feeds without get_chainlink_price()."""
+    trading_loop = TradingLoop(state=mock_state, mode="dry-run")
+    legacy_rtds = type("LegacyRTDS", (), {"current_price": 70123.45})()
+
+    trading_loop.feeds = MagicMock()
+    trading_loop.feeds.polymarket_rtds_feed = legacy_rtds
+
+    assert trading_loop._get_opening_chainlink_price() == pytest.approx(70123.45)
+
+
 @pytest.mark.asyncio
 async def test_trading_loop_dry_run(mock_feed_manager, mock_state, mock_market_data):
     """Test the trading loop in dry-run mode."""

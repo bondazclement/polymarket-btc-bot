@@ -81,6 +81,10 @@ class FeedManager:
 
         for name, feed in feeds.items():
             last_ts = feed.get_last_message_ts()
+            if name == "polymarket_rtds":
+                last_price_ts = feed.get_last_price_ts()
+                if last_price_ts > 0.0:
+                    last_ts = max(last_ts, last_price_ts)
             if last_ts == 0.0:
                 self.health_status[name] = False
             else:

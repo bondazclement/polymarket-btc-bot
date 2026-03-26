@@ -73,6 +73,7 @@ class PolymarketCLOBWebSocket:
         self.last_message_ts: float = 0.0
         # Stockage des token_ids pour re-subscribe automatique après reconnexion
         self._subscribed_token_ids: List[str] = []
+        self.tick_sizes: Dict[str, float] = {}
 
     async def connect(self) -> None:
         """Connect to the Polymarket CLOB WebSocket market channel.
@@ -97,7 +98,15 @@ class PolymarketCLOBWebSocket:
                         token_ids=self._subscribed_token_ids,
                     )
 
-                await self._listen()
+                ping_task = asyncio.create_task(self._ping_loop())
+                try:
+                    await self._listen()
+                finally:
+                    ping_task.cancel()
+                    try:
+                        await ping_task
+                    except asyncio.CancelledError:
+                        pass
             except Exception as e:
                 logger.error("Polymarket CLOB WebSocket error", error=str(e))
             finally:
@@ -160,6 +169,9 @@ class PolymarketCLOBWebSocket:
 
         async for msg in self.ws:
             if msg.type == aiohttp.WSMsgType.TEXT:
+                if msg.data == "PONG":
+                    self.last_message_ts = time.monotonic()
+                    continue
                 try:
                     data: dict | list = orjson.loads(msg.data)
                     if isinstance(data, list):
@@ -181,6 +193,16 @@ class PolymarketCLOBWebSocket:
                 self.last_message_ts = time.monotonic()
             elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
                 break
+
+    async def _ping_loop(self) -> None:
+        """Send text PING every 10 seconds to keep market-channel socket alive."""
+        while True:
+            await asyncio.sleep(10)
+            if self.ws and not self.ws.closed:
+                try:
+                    await self.ws.send_str("PING")
+                except Exception:
+                    break
 
     def _handle_message(self, data: dict | list) -> None:
         """Handle incoming messages from the CLOB WebSocket.
@@ -239,6 +261,23 @@ class PolymarketCLOBWebSocket:
                         best_bid=self.best_prices[token_id]["best_bid"],
                         best_ask=self.best_prices[token_id]["best_ask"],
                     )
+                elif event_type == "price_change":
+                    best_bid = msg.get("best_bid")
+                    best_ask = msg.get("best_ask")
+                    if best_bid is not None and best_ask is not None:
+                        self.best_prices[token_id] = {
+                            "best_bid": float(best_bid),
+                            "best_ask": float(best_ask),
+                        }
+                elif event_type == "tick_size_change":
+                    new_tick_size = msg.get("new_tick_size")
+                    if new_tick_size is not None:
+                        self.tick_sizes[token_id] = float(new_tick_size)
+                        logger.info(
+                            "Tick size changed",
+                            token_id=token_id,
+                            new_tick_size=self.tick_sizes[token_id],
+                        )
 
             except (KeyError, ValueError, TypeError) as e:
                 logger.error(

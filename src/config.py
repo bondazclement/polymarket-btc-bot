@@ -6,11 +6,12 @@ This module loads environment variables and defines constants used across the bo
 
 from dataclasses import dataclass
 from os import getenv
+from pathlib import Path
 
 from dotenv import load_dotenv
 
 
-load_dotenv()
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 
 @dataclass(slots=True, frozen=True)
