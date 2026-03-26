@@ -1,7 +1,7 @@
 # CLAUDE.md — Mémoire Projet pour Claude Code
 
 > Dernière mise à jour : **26 mars 2026**
-> Sources : conversations "Planification", "Analyse logs dry-run #1", "Correction feeds + vérification MCP"
+> Sources : conversations "Planification", "Analyse logs dry-run #1", "Correction feeds + vérification MCP", "Fix PING + re-subscription WS"
 
 ---
 
@@ -74,6 +74,29 @@ Claude Code Sonnet 4.6. Consultation de la documentation officielle Polymarket v
 - `test_clob_ws_feed.py` : **nouveau** — 11 tests CLOB WS
 - `test_rtds_feed.py` : **nouveau** — 8 tests RTDS
 - **Résultat** : 52/52 tests passent
+
+### Fix PING applicatif + re-subscription après reconnexion (26 mars 2026)
+
+Claude Code Sonnet 4.6. Consultation MCP avant modification. **2 fichiers modifiés.**
+
+**Ce qui a été découvert via MCP** :
+
+| Point | Supposé dans le retour reçu | Confirmé par le MCP |
+|---|---|---|
+| PING format CLOB | `ws.ping()` (protocole RFC 6455) | `send_str("PING")` (text frame applicatif) |
+| PING format RTDS | Non précisé | `send_str("PING")` (text frame applicatif) |
+| PING fréquence CLOB | 10 secondes | **10 secondes** ✅ |
+| PING fréquence RTDS | 5 secondes | **5 secondes** ✅ |
+| Réponse serveur | Non précisé | `"PONG"` text frame — doit être ignoré avant `orjson.loads()` |
+
+**Bug collatéral découvert à l'audit** : `"PONG"` arrivant dans `_listen()` déclenchait `orjson.loads("PONG")` → `JSONDecodeError` → reconnexion inutile.
+
+**Changements appliqués** :
+- `polymarket_clob_ws.py` : `_ping_loop()` (10s), `_subscribed_token_ids` stocké, re-subscribe auto sur reconnexion, garde `"PONG"` dans `_listen()`
+- `polymarket_rtds.py` : `_ping_loop()` (5s), garde `"PONG"` dans `_listen()`
+- `test_clob_ws_feed.py` : 5 nouveaux tests (PING, PONG skip, stockage token_ids) → 16 tests total
+- `test_rtds_feed.py` : 2 nouveaux tests (PING, PONG skip) → 10 tests total
+- **Résultat** : 59/59 tests passent
 
 ---
 
@@ -209,9 +232,25 @@ Fix : `sqrt(3600 / window_seconds)` au lieu de `sqrt(3600 * 24 * 365 / window_se
 
 Voir historique section 2.
 
-### ⚠️ À SURVEILLER — RTDS PING toutes les 5s
+### ✅ RÉSOLU — PING applicatif absent + crash PONG (CLOB WS + RTDS) — 26 mars 2026
 
-La doc officielle indique que le RTDS requiert un PING toutes les 5 secondes pour maintenir la connexion. Le feed actuel ne l'envoie pas explicitement (aiohttp gère les pings WS niveau protocole). Le RTDS était stable au dry-run #1 sans ping explicite. Si des déconnexions fréquentes apparaissent (`polymarket_rtds: false`), ajouter un `asyncio.create_task(_ping_loop())` dans `connect()`.
+**Root cause de déconnexions silencieuses + reconnexions inutiles.**
+
+La doc Polymarket (MCP) impose des PINGs applicatifs (text frames, pas RFC 6455) :
+- CLOB WS : `"PING"` texte brut toutes les **10 secondes** → serveur répond `"PONG"` texte brut
+- RTDS : `"PING"` texte brut toutes les **5 secondes** → serveur répond `"PONG"` texte brut
+
+**Point critique** : `send_str("PING")` (text frame), **pas** `ws.ping()` (ping protocole RFC 6455). aiohttp gère déjà les pings RFC 6455 nativement — `ws.ping()` aurait été ignoré par Polymarket.
+
+**Bug collatéral** : sans garde dans `_listen()`, la réponse `"PONG"` déclenchait `orjson.loads("PONG")` → `JSONDecodeError` → reconnexion inutile toutes les ~10s.
+
+**Fix appliqué** (`polymarket_clob_ws.py` + `polymarket_rtds.py`) :
+- `_ping_loop()` : nouvelle méthode, `send_str("PING")` en boucle (10s CLOB, 5s RTDS)
+- `connect()` : `asyncio.create_task(_ping_loop())` lancé après connexion, annulé proprement dans `finally` via `ping_task.cancel()` + `await ping_task`
+- `_listen()` : garde `if msg.data == "PONG": continue` avant `orjson.loads()`
+
+**Tests ajoutés** : 5 nouveaux tests (PING text frame, PONG skip, stockage token_ids).
+**Résultat** : 59/59 tests passent.
 
 ### ℹ️ MANQUANT — src/utils/metrics.py
 
@@ -584,3 +623,22 @@ python3 -m src --mode dry-run --log-level DEBUG
 9. **Tests `test_loop_dry.py`** : mocks RTDS exposent `get_chainlink_price` + `set_price_to_beat` + `get_price_to_beat`. Mock CLOB expose `subscribe_assets` comme `AsyncMock`.
 
 10. **Bootstrap win_rate** : `BOOTSTRAP_WIN_RATE = 0.65` pour les 20 premiers trades — sinon Kelly retourne 0.
+
+11. **PING applicatifs WS** : Les deux feeds envoient `send_str("PING")` (text frame). **Ne jamais utiliser `ws.ping()`** (ping protocole RFC 6455) — Polymarket l'ignore. CLOB : 10s. RTDS : 5s.
+
+12. **Garde "PONG" dans `_listen()`** : Le serveur répond `"PONG"` (text frame brut, pas JSON). Le `if msg.data == "PONG": continue` dans les deux `_listen()` est **indispensable** — sans lui, `orjson.loads("PONG")` lève une exception et provoque une reconnexion inutile toutes les 10s.
+
+13. **Re-subscription CLOB après reconnexion** : `subscribe_assets()` stocke les token_ids dans `self._subscribed_token_ids`. `connect()` les réutilise automatiquement à chaque reconnexion. Ne pas supprimer cette logique.
+
+14. **`_ping_loop` annulé dans `finally`** : Pattern obligatoire dans `connect()` après tout `await self._listen()` :
+    ```python
+    ping_task = asyncio.create_task(self._ping_loop())
+    try:
+        await self._listen()
+    finally:
+        ping_task.cancel()
+        try:
+            await ping_task
+        except asyncio.CancelledError:
+            pass
+    ```

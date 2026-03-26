@@ -63,12 +63,15 @@ class PolymarketCLOBWebSocket:
         self.ws: aiohttp.ClientWebSocketResponse | None = None
         self._session: aiohttp.ClientSession | None = None
         self.last_message_ts: float = 0.0
+        self._subscribed_token_ids: list[str] = []
 
     async def connect(self) -> None:
         """Connect to the Polymarket CLOB WebSocket stream.
 
-        Does NOT subscribe on connect — subscribe_assets() must be called
+        Does NOT subscribe on first connect — subscribe_assets() must be called
         from loop.py after resolve_market_data() returns token IDs.
+        On reconnection, automatically re-subscribes if token IDs were previously set.
+        Runs _ping_loop() concurrently with _listen() to send application-level PINGs.
         """
         while True:
             try:
@@ -77,7 +80,22 @@ class PolymarketCLOBWebSocket:
                 self.ws = await session.ws_connect(self.ws_url)
                 logger.info("Connected to Polymarket CLOB WebSocket")
                 self.reconnect_attempts = 0
-                await self._listen()
+                # Re-subscribe on reconnection if we already had token IDs
+                if self._subscribed_token_ids:
+                    await self.subscribe_assets(self._subscribed_token_ids)
+                    logger.info(
+                        "Re-subscribed after reconnection",
+                        token_ids=self._subscribed_token_ids,
+                    )
+                ping_task = asyncio.create_task(self._ping_loop())
+                try:
+                    await self._listen()
+                finally:
+                    ping_task.cancel()
+                    try:
+                        await ping_task
+                    except asyncio.CancelledError:
+                        pass
             except Exception as e:
                 logger.error("Polymarket CLOB WebSocket error", error=str(e))
             finally:
@@ -91,6 +109,7 @@ class PolymarketCLOBWebSocket:
         """Subscribe to order book updates for the given token IDs.
 
         Must be called from loop.py after resolve_market_data() returns token IDs.
+        Stores token_ids so they can be re-used automatically after reconnection.
         Idempotent: re-subscribing with new token IDs is safe.
 
         Args:
@@ -99,6 +118,7 @@ class PolymarketCLOBWebSocket:
         if not token_ids:
             logger.warning("subscribe_assets called with empty token_ids list")
             return
+        self._subscribed_token_ids = token_ids
         if self.ws is None or self.ws.closed:
             logger.warning(
                 "Cannot subscribe: CLOB WS not connected yet", token_ids=token_ids
@@ -115,6 +135,22 @@ class PolymarketCLOBWebSocket:
         await self.ws.send_str(payload.decode())
         logger.info("Subscribed to CLOB assets", token_ids=token_ids)
 
+    async def _ping_loop(self) -> None:
+        """Send application-level PING text frame every 10s to keep connection alive.
+
+        Polymarket CLOB WS requires a plain-text "PING" every 10 seconds.
+        This is distinct from the protocol-level WebSocket ping (RFC 6455).
+        The server responds with a plain-text "PONG".
+        """
+        while True:
+            await asyncio.sleep(10)
+            if self.ws and not self.ws.closed:
+                try:
+                    await self.ws.send_str("PING")
+                    logger.debug("PING sent to CLOB WS")
+                except Exception:
+                    break
+
     async def _listen(self) -> None:
         """Listen for incoming messages from the WebSocket."""
         if self.ws is None:
@@ -122,6 +158,11 @@ class PolymarketCLOBWebSocket:
 
         async for msg in self.ws:
             if msg.type == aiohttp.WSMsgType.TEXT:
+                # Handle application-level PONG response (plain text, not JSON)
+                if msg.data == "PONG":
+                    logger.debug("PONG received from CLOB WS")
+                    self.last_message_ts = time.monotonic()
+                    continue
                 data: dict | list = orjson.loads(msg.data)
                 if isinstance(data, list):
                     logger.debug("Raw WS message received", msg_count=len(data))

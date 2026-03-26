@@ -52,7 +52,12 @@ class PolymarketRTDS:
         self.last_message_ts: float = 0.0
 
     async def connect(self) -> None:
-        """Connect to the Polymarket RTDS WebSocket stream."""
+        """Connect to the Polymarket RTDS WebSocket stream.
+
+        Runs _ping_loop() concurrently with _listen() to send application-level
+        PINGs every 5 seconds as required by the RTDS documentation.
+        Re-subscribes automatically on every reconnection via _subscribe().
+        """
         while True:
             try:
                 session = aiohttp.ClientSession()
@@ -61,7 +66,15 @@ class PolymarketRTDS:
                 logger.info("Connected to Polymarket RTDS WebSocket")
                 self.reconnect_attempts = 0
                 await self._subscribe()
-                await self._listen()
+                ping_task = asyncio.create_task(self._ping_loop())
+                try:
+                    await self._listen()
+                finally:
+                    ping_task.cancel()
+                    try:
+                        await ping_task
+                    except asyncio.CancelledError:
+                        pass
             except Exception as e:
                 logger.error("Polymarket RTDS WebSocket error", error=str(e))
             finally:
@@ -89,6 +102,22 @@ class PolymarketRTDS:
         await self.ws.send_str(subscribe_message.decode())
         logger.info("Subscribed to RTDS Chainlink BTC/USD feed")
 
+    async def _ping_loop(self) -> None:
+        """Send application-level PING text frame every 5s to keep connection alive.
+
+        Polymarket RTDS requires a plain-text "PING" every 5 seconds.
+        This is distinct from the protocol-level WebSocket ping (RFC 6455).
+        The server responds with a plain-text "PONG".
+        """
+        while True:
+            await asyncio.sleep(5)
+            if self.ws and not self.ws.closed:
+                try:
+                    await self.ws.send_str("PING")
+                    logger.debug("PING sent to RTDS")
+                except Exception:
+                    break
+
     async def _listen(self) -> None:
         """Listen for incoming messages from the WebSocket."""
         if self.ws is None:
@@ -96,6 +125,11 @@ class PolymarketRTDS:
 
         async for msg in self.ws:
             if msg.type == aiohttp.WSMsgType.TEXT:
+                # Handle application-level PONG response (plain text, not JSON)
+                if msg.data == "PONG":
+                    logger.debug("PONG received from RTDS")
+                    self.last_message_ts = time.monotonic()
+                    continue
                 data = orjson.loads(msg.data)
                 logger.debug("Raw WS message received", data_type=data.get("type", "unknown"))
                 self._handle_message(data)

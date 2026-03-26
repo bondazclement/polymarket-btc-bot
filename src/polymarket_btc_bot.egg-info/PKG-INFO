@@ -1,0 +1,23 @@
+Metadata-Version: 2.4
+Name: polymarket-btc-bot
+Version: 0.1.0
+Summary: Automated trading bot for Polymarket BTC UpDown 5-minute markets
+Author-email: Devstral 2 <vibe@mistral.ai>
+License: MIT
+Requires-Python: >=3.11
+License-File: LICENSE
+Requires-Dist: uvloop>=0.22.0
+Requires-Dist: orjson>=3.10.0
+Requires-Dist: aiohttp>=3.9.0
+Requires-Dist: py-clob-client>=0.34.5
+Requires-Dist: numpy>=1.26.0
+Requires-Dist: scipy>=1.12.0
+Requires-Dist: structlog>=24.0.0
+Requires-Dist: python-dotenv>=1.0.0
+Requires-Dist: web3>=7.0.0
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0.0; extra == "dev"
+Requires-Dist: pytest-asyncio>=0.23.0; extra == "dev"
+Requires-Dist: mypy>=1.0.0; extra == "dev"
+Requires-Dist: ruff>=0.4.0; extra == "dev"
+Dynamic: license-file

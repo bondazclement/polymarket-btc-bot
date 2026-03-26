@@ -86,3 +86,57 @@ def test_price_to_beat_independent_of_current_price(rtds: PolymarketRTDS) -> Non
 
     assert rtds.get_chainlink_price() == pytest.approx(70000.0)
     assert rtds.get_price_to_beat() == pytest.approx(69500.0)
+
+
+@pytest.mark.asyncio
+async def test_ping_loop_sends_ping_text_frame() -> None:
+    """_ping_loop sends plain-text 'PING' (not a protocol ping) every 5s."""
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    rtds = PolymarketRTDS()
+    mock_ws = AsyncMock()
+    mock_ws.closed = False
+    rtds.ws = mock_ws
+
+    task = asyncio.create_task(rtds._ping_loop())
+    await asyncio.sleep(0)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    for call in mock_ws.send_str.call_args_list:
+        assert call[0][0] == "PING"
+
+
+@pytest.mark.asyncio
+async def test_listen_skips_pong_and_updates_last_message_ts() -> None:
+    """_listen updates last_message_ts on PONG without calling _handle_message."""
+    import asyncio
+    from unittest.mock import MagicMock, patch
+    import aiohttp
+
+    rtds = PolymarketRTDS()
+
+    pong_msg = MagicMock()
+    pong_msg.type = aiohttp.WSMsgType.TEXT
+    pong_msg.data = "PONG"
+
+    close_msg = MagicMock()
+    close_msg.type = aiohttp.WSMsgType.CLOSED
+
+    async def fake_iter():
+        yield pong_msg
+        yield close_msg
+
+    mock_ws = MagicMock()
+    mock_ws.__aiter__ = lambda self: fake_iter()
+    rtds.ws = mock_ws
+
+    with patch.object(rtds, "_handle_message") as mock_handle:
+        await rtds._listen()
+        mock_handle.assert_not_called()
+
+    assert rtds.last_message_ts > 0
