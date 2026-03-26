@@ -98,7 +98,7 @@ async def redeem_if_resolved(
     side: str = "",
     entry_price: float = 0.0,
     entry_size: float = 0.0,
-) -> float | None:
+) -> tuple[float, bool] | None:
     """Redeem tokens if the market is resolved.
 
     Checks the Gamma API for market resolution status, determines win/loss
@@ -114,7 +114,7 @@ async def redeem_if_resolved(
         entry_size: Size of the order in USDC.
 
     Returns:
-        P&L amount in USDC or None if redemption is not available.
+        Tuple of (pnl, is_win), or None if redemption is not available.
     """
     resolved = await _is_market_resolved(slug)
     if not resolved:
@@ -160,10 +160,10 @@ async def redeem_if_resolved(
                     entry_price=entry_price,
                     num_tokens=num_tokens,
                 )
-                return pnl
+                return pnl, is_win
             else:
-                logger.warning("Entry data not available, returning estimate")
-                return 0.0
+                logger.warning("Entry data not available, returning neutral P&L")
+                return 0.0, is_win
         except Exception as e:
             logger.error(
                 "Redeem failed",

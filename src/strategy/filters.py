@@ -28,10 +28,6 @@ def should_trade(signal: SignalResult, best_ask: float, state: BotState) -> tupl
     if best_ask > CONFIG.MAX_TOKEN_PRICE:
         return False, f"Best ask price {best_ask} exceeds maximum allowed price {CONFIG.MAX_TOKEN_PRICE}"
 
-    # Check if the signal confidence is sufficient
-    if signal.confidence < 0.6:
-        return False, f"Signal confidence {signal.confidence} is below the required threshold of 0.6"
-
     # Check if there is an open position
     if state.current_position is not None:
         return False, "There is already an open position"

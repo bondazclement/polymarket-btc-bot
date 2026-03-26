@@ -14,7 +14,6 @@ Format validé live le 26 mars 2026 :
 """
 
 import asyncio
-import json
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -63,6 +62,7 @@ class PolymarketRTDS:
         self.ws: aiohttp.ClientWebSocketResponse | None = None
         self._session: aiohttp.ClientSession | None = None
         self.last_message_ts: float = 0.0
+        self.last_price_ts: float = 0.0
 
     async def connect(self) -> None:
         """Connect to the Polymarket RTDS WebSocket stream.
@@ -116,7 +116,7 @@ class PolymarketRTDS:
                     "topic": "crypto_prices_chainlink",
                     "type": "*",
                     # filters DOIT être une string JSON (pas un dict) — bug connu rs-clob-client #136
-                    "filters": json.dumps({"symbol": "btc/usd"}),
+                    "filters": orjson.dumps({"symbol": "btc/usd"}).decode(),
                 }
             ],
         })
@@ -190,10 +190,17 @@ class PolymarketRTDS:
                 return
 
             price_value: Optional[float] = None
+            topic = str(data.get("topic", ""))
+            is_chainlink_topic = topic in ("", "crypto_prices_chainlink")
 
             # Format batch (validé live) : payload.data[] = tableau de points
             data_points = payload.get("data")
-            if data_points and isinstance(data_points, list) and len(data_points) > 0:
+            if (
+                is_chainlink_topic
+                and data_points
+                and isinstance(data_points, list)
+                and len(data_points) > 0
+            ):
                 # Prendre le point le plus récent (dernier du tableau)
                 latest = data_points[-1]
                 raw_value = latest.get("value")
@@ -201,7 +208,7 @@ class PolymarketRTDS:
                     price_value = float(raw_value)
 
             # Fallback format unitaire documenté : payload.value (float direct)
-            elif "value" in payload:
+            elif is_chainlink_topic and "value" in payload:
                 price_value = float(payload["value"])
 
             # Fallback format documenté avec topic/type
@@ -212,6 +219,7 @@ class PolymarketRTDS:
 
             if price_value is not None:
                 self.current_price = price_value
+                self.last_price_ts = time.monotonic()
                 logger.debug("Chainlink price updated", price=self.current_price)
 
         except (KeyError, ValueError, TypeError, IndexError) as e:
@@ -256,6 +264,22 @@ class PolymarketRTDS:
             Current Chainlink price or None if not available.
         """
         return self.current_price
+
+    def get_current_price(self) -> Optional[float]:
+        """Backward-compatible alias for current Chainlink BTC/USD price.
+
+        Returns:
+            Current Chainlink price or None if not available.
+        """
+        return self.current_price
+
+    def get_last_price_ts(self) -> float:
+        """Get monotonic timestamp of the last RTDS message that updated the price.
+
+        Returns:
+            Monotonic timestamp of last Chainlink price update, or 0.0 if none received.
+        """
+        return self.last_price_ts
 
     def get_price_to_beat(self) -> Optional[float]:
         """Get the price to beat for the current 5-minute window.

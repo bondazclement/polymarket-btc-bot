@@ -71,8 +71,14 @@ class TradingLoop:
             try:
                 await self._run_window()
             except Exception as e:
-                logger.error("Error in trading window", error=str(e))
-                await asyncio.sleep(5)
+                remaining = get_time_remaining()
+                wait_seconds = max(remaining, 0.0) + 1.0
+                logger.error(
+                    "Error in trading window",
+                    error=str(e),
+                    wait_seconds=wait_seconds,
+                )
+                await asyncio.sleep(wait_seconds)
 
     async def _run_window(self) -> None:
         """Run a single trading window iteration.
@@ -109,7 +115,7 @@ class TradingLoop:
         )
 
         # ─── T=0 : Capturer le prix Chainlink d'ouverture ──────────────────────
-        opening_price = self.feeds.polymarket_rtds_feed.get_chainlink_price()
+        opening_price = self._get_opening_chainlink_price()
         if opening_price is None:
             logger.error(
                 "Failed to get opening Chainlink price — RTDS not connected or no data yet"
@@ -178,6 +184,7 @@ class TradingLoop:
         # ─── T=270 : Évaluer le signal ─────────────────────────────────────────
         trade_decision: Optional[TradeDecision] = await self.strategy.evaluate_window(
             feeds=self.feeds,
+            signal_scorer=self.signal_scorer,
             state=self.state,
             up_token_id=up_token_id,
             down_token_id=down_token_id,
@@ -262,3 +269,29 @@ class TradingLoop:
                 )
             except Exception as e:
                 logger.error("Failed to redeem", error=str(e))
+
+    def _get_opening_chainlink_price(self) -> Optional[float]:
+        """Return RTDS Chainlink price with compatibility fallbacks.
+
+        Returns:
+            Opening Chainlink price if available, else None.
+        """
+        rtds_feed = self.feeds.polymarket_rtds_feed
+
+        get_chainlink_price = getattr(rtds_feed, "get_chainlink_price", None)
+        if callable(get_chainlink_price):
+            price = get_chainlink_price()
+            if isinstance(price, (int, float)):
+                return float(price)
+
+        get_current_price = getattr(rtds_feed, "get_current_price", None)
+        if callable(get_current_price):
+            price = get_current_price()
+            if isinstance(price, (int, float)):
+                return float(price)
+
+        raw_price = getattr(rtds_feed, "current_price", None)
+        if isinstance(raw_price, (int, float)):
+            return float(raw_price)
+
+        return None

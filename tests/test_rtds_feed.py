@@ -73,6 +73,17 @@ def test_current_price_starts_none(rtds: PolymarketRTDS) -> None:
     assert rtds.get_chainlink_price() is None
 
 
+def test_get_current_price_alias(rtds: PolymarketRTDS) -> None:
+    """get_current_price should be an alias for get_chainlink_price."""
+    msg = {
+        "topic": "crypto_prices_chainlink",
+        "type": "update",
+        "payload": {"symbol": "btc/usd", "value": 70123.45},
+    }
+    rtds._handle_message(msg)
+    assert rtds.get_current_price() == pytest.approx(70123.45)
+
+
 def test_price_to_beat_independent_of_current_price(rtds: PolymarketRTDS) -> None:
     """price_to_beat and current_price are independent attributes."""
     msg = {

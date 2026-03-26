@@ -79,6 +79,13 @@ class TakerSelectiveStrategy:
 
         # Calculate delta
         delta = calc_delta(current_price, price_to_beat)
+        if abs(delta) < CONFIG.DELTA_MIN:
+            logger.info(
+                "Skip: delta below threshold",
+                delta=delta,
+                delta_min=CONFIG.DELTA_MIN,
+            )
+            return None
 
         # Calculate time remaining in window
         time_remaining = get_time_remaining()
