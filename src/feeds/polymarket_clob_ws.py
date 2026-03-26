@@ -1,16 +1,17 @@
 """
 Polymarket CLOB WebSocket feed for order book data.
 
-This module connects to the Polymarket CLOB WebSocket stream,
-subscribes to the order book for the active market, and maintains
-the best bid and ask prices for each token.
+This module connects to the Polymarket CLOB WebSocket market channel,
+subscribes to order book updates for the active BTC 5m market tokens,
+and maintains a local cache of best bid/ask prices.
 
-MCP-VERIFIED (2026-03-25):
-- Subscribe format: {"type": "market", "assets_ids": [...], "custom_feature_enabled": true}
-- Messages use event_type field (not "type"), asset_id for token identifier
-- bids/asks in "book" events are objects: [{"price": "string", "size": "string"}]
-- "best_bid_ask" event requires custom_feature_enabled: true
-- Messages may arrive as a list of dicts
+Formats validés via MCP + doc officielle Polymarket (26 mars 2026) :
+- Subscribe  : {"assets_ids": ["<up_id>", "<down_id>"], "type": "market",
+                "custom_feature_enabled": true}
+- Events     : event_type (pas "type"), asset_id (pas "token_id")
+  - "book"         : snapshot complet, bids/asks = [{price, size}, ...]
+  - "best_bid_ask" : top of book, best_bid/best_ask = "0.52" (string)
+- Keepalive  : heartbeat=20.0 dans aiohttp suffit pour le CLOB WS (RFC 6455)
 """
 
 import asyncio
@@ -30,11 +31,11 @@ logger = get_logger(__name__)
 
 @dataclass(slots=True)
 class OrderBookLevel:
-    """Dataclass representing a single level in the order book.
+    """A single price level in the order book.
 
     Attributes:
-        price: Price of the order.
-        size: Size of the order.
+        price: Price at this level.
+        size: Size available at this level.
     """
 
     price: float
@@ -44,12 +45,19 @@ class OrderBookLevel:
 class PolymarketCLOBWebSocket:
     """Polymarket CLOB WebSocket client for order book data.
 
+    Subscribes to the market channel for specific token IDs (resolved via Gamma API).
+    subscribe_assets() must be called from loop.py after resolve_market_data()
+    returns the up/down token IDs.
+
+    Maintains two caches:
+    - order_books: full book snapshots from "book" events
+    - best_prices: top of book from "best_bid_ask" events (preferred, faster)
+
     Attributes:
-        ws_url: WebSocket URL for Polymarket CLOB.
-        order_books: Dictionary of order books by token ID.
-        best_prices: Cache of best bid/ask per token ID (from best_bid_ask events).
-        reconnect_attempts: Number of reconnection attempts.
-        max_reconnect_delay: Maximum delay between reconnection attempts.
+        ws_url: WebSocket URL for Polymarket CLOB market channel.
+        order_books: Per-token full order book cache.
+        best_prices: Per-token best bid/ask cache (fast path).
+        last_message_ts: Monotonic timestamp of last received message.
     """
 
     def __init__(self) -> None:
@@ -57,45 +65,39 @@ class PolymarketCLOBWebSocket:
         self.ws_url: str = CONFIG.POLYMARKET_CLOB_WS_URL
         self.order_books: Dict[str, Dict[str, List[OrderBookLevel]]] = {}
         self.best_prices: Dict[str, Dict[str, float]] = {}
-        # Format: {"<token_id>": {"best_bid": 0.48, "best_ask": 0.52}}
+        # Format : {"<token_id>": {"best_bid": 0.48, "best_ask": 0.52}}
         self.reconnect_attempts: int = 0
         self.max_reconnect_delay: int = 30
         self.ws: aiohttp.ClientWebSocketResponse | None = None
         self._session: aiohttp.ClientSession | None = None
         self.last_message_ts: float = 0.0
-        self._subscribed_token_ids: list[str] = []
+        # Stockage des token_ids pour re-subscribe automatique après reconnexion
+        self._subscribed_token_ids: List[str] = []
 
     async def connect(self) -> None:
-        """Connect to the Polymarket CLOB WebSocket stream.
+        """Connect to the Polymarket CLOB WebSocket market channel.
 
-        Does NOT subscribe on first connect — subscribe_assets() must be called
-        from loop.py after resolve_market_data() returns token IDs.
-        On reconnection, automatically re-subscribes if token IDs were previously set.
-        Runs _ping_loop() concurrently with _listen() to send application-level PINGs.
+        Re-subscribes automatically after reconnection if token_ids are known.
         """
         while True:
             try:
                 session = aiohttp.ClientSession()
                 self._session = session
-                self.ws = await session.ws_connect(self.ws_url)
+                # heartbeat=20.0 : RFC 6455 pings gérés par aiohttp (suffit pour CLOB WS)
+                self.ws = await session.ws_connect(self.ws_url, heartbeat=20.0)
                 logger.info("Connected to Polymarket CLOB WebSocket")
                 self.reconnect_attempts = 0
-                # Re-subscribe on reconnection if we already had token IDs
+
+                # Re-subscribe automatiquement si des token_ids sont connus
+                # (cas reconnexion mid-window)
                 if self._subscribed_token_ids:
-                    await self.subscribe_assets(self._subscribed_token_ids)
+                    await self._send_subscribe(self._subscribed_token_ids)
                     logger.info(
-                        "Re-subscribed after reconnection",
+                        "Re-subscribed to CLOB assets after reconnection",
                         token_ids=self._subscribed_token_ids,
                     )
-                ping_task = asyncio.create_task(self._ping_loop())
-                try:
-                    await self._listen()
-                finally:
-                    ping_task.cancel()
-                    try:
-                        await ping_task
-                    except asyncio.CancelledError:
-                        pass
+
+                await self._listen()
             except Exception as e:
                 logger.error("Polymarket CLOB WebSocket error", error=str(e))
             finally:
@@ -105,73 +107,77 @@ class PolymarketCLOBWebSocket:
                 self.ws = None
             await self._reconnect()
 
-    async def subscribe_assets(self, token_ids: list[str]) -> None:
+    async def subscribe_assets(self, token_ids: List[str]) -> None:
         """Subscribe to order book updates for the given token IDs.
 
         Must be called from loop.py after resolve_market_data() returns token IDs.
-        Stores token_ids so they can be re-used automatically after reconnection.
         Idempotent: re-subscribing with new token IDs is safe.
+        Stores token_ids for automatic re-subscription after reconnection.
 
         Args:
-            token_ids: List of CLOB token IDs to subscribe to (e.g. [up_id, down_id]).
+            token_ids: List of CLOB token IDs (e.g. [up_token_id, down_token_id]).
         """
         if not token_ids:
             logger.warning("subscribe_assets called with empty token_ids list")
             return
-        self._subscribed_token_ids = token_ids
+
+        # Stocker pour re-subscribe automatique après reconnexion
+        self._subscribed_token_ids = list(token_ids)
+
         if self.ws is None or self.ws.closed:
             logger.warning(
-                "Cannot subscribe: CLOB WS not connected yet", token_ids=token_ids
+                "Cannot subscribe now: CLOB WS not connected — will auto-subscribe on reconnect",
+                token_ids=token_ids,
             )
             return
 
-        payload = orjson.dumps(
-            {
-                "assets_ids": token_ids,
-                "type": "market",
-                "custom_feature_enabled": True,
-            }
-        )
+        await self._send_subscribe(token_ids)
+
+    async def _send_subscribe(self, token_ids: List[str]) -> None:
+        """Send the subscribe message to the CLOB WebSocket.
+
+        Format officiel validé :
+        {"assets_ids": [...], "type": "market", "custom_feature_enabled": true}
+
+        Args:
+            token_ids: List of CLOB token IDs to subscribe to.
+        """
+        if self.ws is None or self.ws.closed:
+            return
+
+        payload = orjson.dumps({
+            "assets_ids": token_ids,
+            "type": "market",
+            "custom_feature_enabled": True,
+        })
         await self.ws.send_str(payload.decode())
         logger.info("Subscribed to CLOB assets", token_ids=token_ids)
 
-    async def _ping_loop(self) -> None:
-        """Send application-level PING text frame every 10s to keep connection alive.
-
-        Polymarket CLOB WS requires a plain-text "PING" every 10 seconds.
-        This is distinct from the protocol-level WebSocket ping (RFC 6455).
-        The server responds with a plain-text "PONG".
-        """
-        while True:
-            await asyncio.sleep(10)
-            if self.ws and not self.ws.closed:
-                try:
-                    await self.ws.send_str("PING")
-                    logger.debug("PING sent to CLOB WS")
-                except Exception:
-                    break
-
     async def _listen(self) -> None:
-        """Listen for incoming messages from the WebSocket."""
+        """Listen for incoming messages from the CLOB WebSocket."""
         if self.ws is None:
             return
 
         async for msg in self.ws:
             if msg.type == aiohttp.WSMsgType.TEXT:
-                # Handle application-level PONG response (plain text, not JSON)
-                if msg.data == "PONG":
-                    logger.debug("PONG received from CLOB WS")
+                try:
+                    data: dict | list = orjson.loads(msg.data)
+                    if isinstance(data, list):
+                        logger.debug(
+                            "Raw WS message received",
+                            msg_count=len(data),
+                        )
+                    else:
+                        logger.debug(
+                            "Raw WS message received",
+                            event_type=data.get("event_type", "unknown"),
+                        )
+                    self._handle_message(data)
                     self.last_message_ts = time.monotonic()
-                    continue
-                data: dict | list = orjson.loads(msg.data)
-                if isinstance(data, list):
-                    logger.debug("Raw WS message received", msg_count=len(data))
-                else:
-                    logger.debug(
-                        "Raw WS message received",
-                        event_type=data.get("event_type", "unknown"),
-                    )
-                self._handle_message(data)
+                except Exception as e:
+                    logger.error("Failed to parse CLOB WS message", error=str(e))
+            elif msg.type == aiohttp.WSMsgType.PONG:
+                # RFC 6455 pong — connection vivante
                 self.last_message_ts = time.monotonic()
             elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
                 break
@@ -182,11 +188,18 @@ class PolymarketCLOBWebSocket:
         Supports both list-wrapped and single-dict messages.
         Handles event_type: 'book' (full snapshot) and 'best_bid_ask' (top of book).
 
+        Champs validés :
+        - Discriminant : "event_type" (PAS "type")
+        - Identifiant token : "asset_id" (PAS "token_id")
+        - bids/asks : [{price: "0.48", size: "30"}, ...] (objets, PAS tuples)
+
         Args:
             data: Raw parsed message (dict or list of dicts).
         """
         messages = data if isinstance(data, list) else [data]
         for msg in messages:
+            event_type = ""
+            token_id = ""
             try:
                 event_type = msg.get("event_type", "")
                 token_id = msg.get("asset_id", "")
@@ -195,7 +208,7 @@ class PolymarketCLOBWebSocket:
                     continue
 
                 if event_type == "book":
-                    # Full order book snapshot
+                    # Snapshot complet du book — remplacer le cache existant
                     if token_id not in self.order_books:
                         self.order_books[token_id] = {"bids": [], "asks": []}
                     self.order_books[token_id]["bids"] = [
@@ -214,7 +227,8 @@ class PolymarketCLOBWebSocket:
                     )
 
                 elif event_type == "best_bid_ask":
-                    # Top of book update — fast path for taker strategy
+                    # Top of book — fast path pour la stratégie taker
+                    # nécessite custom_feature_enabled: true dans le subscribe
                     self.best_prices[token_id] = {
                         "best_bid": float(msg["best_bid"]),
                         "best_ask": float(msg["best_ask"]),
@@ -229,25 +243,10 @@ class PolymarketCLOBWebSocket:
             except (KeyError, ValueError, TypeError) as e:
                 logger.error(
                     "Failed to handle CLOB message",
-                    event_type=msg.get("event_type", "unknown"),
-                    token_id=msg.get("asset_id", "unknown"),
+                    event_type=event_type,
+                    token_id=token_id,
                     error=str(e),
                 )
-
-    async def _reconnect(self) -> None:
-        """Reconnect with exponential backoff."""
-        delay = min(2**self.reconnect_attempts, self.max_reconnect_delay)
-        logger.info("Reconnecting to Polymarket CLOB WebSocket", delay=delay)
-        await asyncio.sleep(delay)
-        self.reconnect_attempts += 1
-
-    def get_last_message_ts(self) -> float:
-        """Get the timestamp of the last successfully parsed message.
-
-        Returns:
-            Monotonic timestamp of last message, or 0.0 if none received.
-        """
-        return self.last_message_ts
 
     def get_best_ask(self, token_id: str) -> Optional[float]:
         """Get the best ask price for a token.
@@ -261,19 +260,16 @@ class PolymarketCLOBWebSocket:
         Returns:
             Best ask price as float, or None if no data available.
         """
-        # Fast path: best_bid_ask event cache
+        # Fast path : cache best_bid_ask (mis à jour à chaque tick)
         if token_id in self.best_prices:
             return self.best_prices[token_id]["best_ask"]
-        # Fallback: full book
+        # Fallback : snapshot complet
         if token_id in self.order_books and self.order_books[token_id]["asks"]:
             return self.order_books[token_id]["asks"][0].price
         return None
 
     def get_best_bid(self, token_id: str) -> Optional[float]:
         """Get the best bid price for a token.
-
-        Reads from best_prices cache first (populated by best_bid_ask events),
-        falls back to order_books (populated by book events).
 
         Args:
             token_id: CLOB token ID.
@@ -286,3 +282,29 @@ class PolymarketCLOBWebSocket:
         if token_id in self.order_books and self.order_books[token_id]["bids"]:
             return self.order_books[token_id]["bids"][0].price
         return None
+
+    def get_order_book(self, token_id: str) -> Optional[Dict[str, List[OrderBookLevel]]]:
+        """Get the full order book for a token.
+
+        Args:
+            token_id: CLOB token ID.
+
+        Returns:
+            Dict with 'bids' and 'asks' lists, or None if no data available.
+        """
+        return self.order_books.get(token_id)
+
+    async def _reconnect(self) -> None:
+        """Reconnect with exponential backoff."""
+        delay = min(2 ** self.reconnect_attempts, self.max_reconnect_delay)
+        logger.info("Reconnecting to Polymarket CLOB WebSocket", delay=delay)
+        await asyncio.sleep(delay)
+        self.reconnect_attempts += 1
+
+    def get_last_message_ts(self) -> float:
+        """Get the timestamp of the last successfully parsed message.
+
+        Returns:
+            Monotonic timestamp of last message, or 0.0 if none received.
+        """
+        return self.last_message_ts

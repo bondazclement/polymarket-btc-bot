@@ -3,19 +3,20 @@ Polymarket RTDS WebSocket feed for Chainlink BTC/USD prices.
 
 This module connects to the Polymarket RTDS WebSocket stream,
 subscribes to the Chainlink BTC/USD price feed, and maintains
-the current price.
+the current price and price_to_beat for the active 5-minute window.
 
-MCP-VERIFIED (2026-03-25):
-- Subscribe format: {"type": "subscribe", "topic": "crypto_prices_chainlink",
-                     "filter": {"symbol": "btc/usd"}}
-- Incoming message format: {"topic": "...", "type": "update", "timestamp": ...,
-                             "payload": {"symbol": "btc/usd", "value": 45000.5, ...}}
-- price_to_beat is NOT set via a RTDS event — it is set by loop.py at T=0
-  via set_price_to_beat() after reading get_chainlink_price().
+Format validé live le 26 mars 2026 :
+- Subscribe  : {"action":"subscribe","subscriptions":[{"topic":"crypto_prices_chainlink","type":"*","filters":"{\"symbol\":\"btc/usd\"}"}]}
+- Messages   : {"payload":{"data":[{"timestamp":1774510674000,"value":69997.62...}, ...]}}
+  → Le prix est dans payload["data"][-1]["value"] (tableau de points, prendre le dernier)
+- Keepalive  : text frame "PING" toutes les 5s (pas RFC 6455 ping)
+- Header     : Origin: https://polymarket.com requis
 """
 
 import asyncio
+import json
 import time
+from dataclasses import dataclass
 from typing import Optional
 
 import aiohttp
@@ -28,14 +29,26 @@ from src.config import CONFIG
 logger = get_logger(__name__)
 
 
+@dataclass(slots=True)
+class ChainlinkPrice:
+    """Dataclass representing a Chainlink BTC/USD price.
+
+    Attributes:
+        price: BTC/USD price.
+        timestamp: Unix timestamp in milliseconds.
+    """
+
+    price: float
+    timestamp: int
+
+
 class PolymarketRTDS:
     """Polymarket RTDS WebSocket client for Chainlink BTC/USD prices.
 
     Attributes:
         ws_url: WebSocket URL for Polymarket RTDS.
-        current_price: Current Chainlink BTC/USD price (updated continuously).
+        current_price: Current Chainlink BTC/USD price.
         price_to_beat: Price at the start of the current 5-minute window.
-                       Set by TradingLoop via set_price_to_beat() at T=0.
         reconnect_attempts: Number of reconnection attempts.
         max_reconnect_delay: Maximum delay between reconnection attempts.
     """
@@ -54,18 +67,21 @@ class PolymarketRTDS:
     async def connect(self) -> None:
         """Connect to the Polymarket RTDS WebSocket stream.
 
-        Runs _ping_loop() concurrently with _listen() to send application-level
-        PINGs every 5 seconds as required by the RTDS documentation.
-        Re-subscribes automatically on every reconnection via _subscribe().
+        Starts both the listener and the PING keepalive loop.
+        Origin header is required by the RTDS server.
         """
         while True:
             try:
-                session = aiohttp.ClientSession()
+                # Origin header requis par le serveur RTDS
+                session = aiohttp.ClientSession(
+                    headers={"Origin": "https://polymarket.com"}
+                )
                 self._session = session
-                self.ws = await session.ws_connect(self.ws_url)
+                self.ws = await session.ws_connect(self.ws_url, heartbeat=20.0)
                 logger.info("Connected to Polymarket RTDS WebSocket")
                 self.reconnect_attempts = 0
                 await self._subscribe()
+                # Lancer le ping applicatif en parallèle du listener
                 ping_task = asyncio.create_task(self._ping_loop())
                 try:
                     await self._listen()
@@ -87,27 +103,31 @@ class PolymarketRTDS:
     async def _subscribe(self) -> None:
         """Subscribe to the Chainlink BTC/USD price feed via RTDS.
 
-        Uses the official RTDS subscription format with type/topic/filter.
+        Format validé live : action + subscriptions[] + filters comme STRING sérialisée.
+        Le champ filters DOIT être une string JSON sérialisée (pas un dict).
         """
         if self.ws is None:
             return
 
-        subscribe_message = orjson.dumps(
-            {
-                "type": "subscribe",
-                "topic": "crypto_prices_chainlink",
-                "filter": {"symbol": "btc/usd"},
-            }
-        )
+        subscribe_message = orjson.dumps({
+            "action": "subscribe",
+            "subscriptions": [
+                {
+                    "topic": "crypto_prices_chainlink",
+                    "type": "*",
+                    # filters DOIT être une string JSON (pas un dict) — bug connu rs-clob-client #136
+                    "filters": json.dumps({"symbol": "btc/usd"}),
+                }
+            ],
+        })
         await self.ws.send_str(subscribe_message.decode())
         logger.info("Subscribed to RTDS Chainlink BTC/USD feed")
 
     async def _ping_loop(self) -> None:
-        """Send application-level PING text frame every 5s to keep connection alive.
+        """Send application-level text PING every 5s to keep the connection alive.
 
-        Polymarket RTDS requires a plain-text "PING" every 5 seconds.
-        This is distinct from the protocol-level WebSocket ping (RFC 6455).
-        The server responds with a plain-text "PONG".
+        La doc RTDS indique explicitement : send PING messages every 5 seconds.
+        Ce sont des text frames 'PING', pas des RFC 6455 pings.
         """
         while True:
             await asyncio.sleep(5)
@@ -119,20 +139,32 @@ class PolymarketRTDS:
                     break
 
     async def _listen(self) -> None:
-        """Listen for incoming messages from the WebSocket."""
+        """Listen for incoming messages from the WebSocket.
+
+        Handles PONG responses (keepalive) and price data messages.
+        """
         if self.ws is None:
             return
 
         async for msg in self.ws:
             if msg.type == aiohttp.WSMsgType.TEXT:
-                # Handle application-level PONG response (plain text, not JSON)
+                # Garde PONG — réponse au PING applicatif
                 if msg.data == "PONG":
-                    logger.debug("PONG received from RTDS")
                     self.last_message_ts = time.monotonic()
+                    logger.debug("PONG received from RTDS")
                     continue
-                data = orjson.loads(msg.data)
-                logger.debug("Raw WS message received", data_type=data.get("type", "unknown"))
-                self._handle_message(data)
+                try:
+                    data = orjson.loads(msg.data)
+                    logger.debug(
+                        "Raw WS message received",
+                        data_preview=str(msg.data)[:100],
+                    )
+                    self._handle_message(data)
+                    self.last_message_ts = time.monotonic()
+                except Exception as e:
+                    logger.error("Failed to parse RTDS message", error=str(e))
+            elif msg.type == aiohttp.WSMsgType.PONG:
+                # RFC 6455 pong (géré aussi par heartbeat aiohttp)
                 self.last_message_ts = time.monotonic()
             elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
                 break
@@ -140,37 +172,74 @@ class PolymarketRTDS:
     def _handle_message(self, data: dict) -> None:
         """Handle incoming RTDS messages.
 
-        Parses Chainlink price update events (type: "update", topic: "crypto_prices_chainlink").
-        The price_to_beat is NOT set here — it is set by loop.py at window T=0
-        via set_price_to_beat().
+        Format réel validé live le 26 mars 2026 :
+        {"payload": {"data": [{"timestamp": 1774510674000, "value": 69997.62}, ...]}}
+
+        Le prix est dans payload["data"][-1]["value"] (prendre le point le plus récent).
+        Fallback sur payload["value"] pour compatibilité avec les messages unitaires
+        documentés ({"topic": "...", "type": "update", "payload": {"value": 67234.50}}).
+
+        La price_to_beat est gérée par TradingLoop via set_price_to_beat(), pas ici.
 
         Args:
             data: Raw RTDS message dict.
         """
         try:
-            topic = data.get("topic", "")
-            msg_type = data.get("type", "")
+            payload = data.get("payload", {})
+            if not payload:
+                return
 
-            if topic == "crypto_prices_chainlink" and msg_type == "update":
-                payload = data.get("payload", {})
-                value = payload.get("value")
-                if value is not None:
-                    self.current_price = float(value)
-                    logger.debug("Chainlink price updated", price=self.current_price)
+            price_value: Optional[float] = None
 
-        except (KeyError, ValueError, TypeError) as e:
+            # Format batch (validé live) : payload.data[] = tableau de points
+            data_points = payload.get("data")
+            if data_points and isinstance(data_points, list) and len(data_points) > 0:
+                # Prendre le point le plus récent (dernier du tableau)
+                latest = data_points[-1]
+                raw_value = latest.get("value")
+                if raw_value is not None:
+                    price_value = float(raw_value)
+
+            # Fallback format unitaire documenté : payload.value (float direct)
+            elif "value" in payload:
+                price_value = float(payload["value"])
+
+            # Fallback format documenté avec topic/type
+            elif data.get("type") == "update" and data.get("topic") == "crypto_prices_chainlink":
+                raw_value = payload.get("value")
+                if raw_value is not None:
+                    price_value = float(raw_value)
+
+            if price_value is not None:
+                self.current_price = price_value
+                logger.debug("Chainlink price updated", price=self.current_price)
+
+        except (KeyError, ValueError, TypeError, IndexError) as e:
             logger.error(
                 "Failed to handle RTDS message",
                 error=str(e),
-                data=str(data)[:200],
+                data_preview=str(data)[:200],
             )
 
     async def _reconnect(self) -> None:
         """Reconnect with exponential backoff."""
-        delay = min(2**self.reconnect_attempts, self.max_reconnect_delay)
+        delay = min(2 ** self.reconnect_attempts, self.max_reconnect_delay)
         logger.info("Reconnecting to Polymarket RTDS WebSocket", delay=delay)
         await asyncio.sleep(delay)
         self.reconnect_attempts += 1
+
+    def set_price_to_beat(self, price: float) -> None:
+        """Set the opening price for the current 5-minute window.
+
+        Called by TradingLoop at window T=0 after reading get_chainlink_price().
+        There is no 'window_start' event in the RTDS API — this must be called
+        explicitly by the trading loop.
+
+        Args:
+            price: Chainlink BTC/USD price at window opening.
+        """
+        self.price_to_beat = price
+        logger.info("Price to beat set for new window", price_to_beat=price)
 
     def get_last_message_ts(self) -> float:
         """Get the timestamp of the last successfully parsed message.
@@ -188,21 +257,10 @@ class PolymarketRTDS:
         """
         return self.current_price
 
-    def set_price_to_beat(self, price: float) -> None:
-        """Set the opening price for the current 5-minute window.
-
-        Called by TradingLoop at window T=0 after reading get_chainlink_price().
-        This replaces the former 'window_start' event which does not exist in
-        the real RTDS API.
-
-        Args:
-            price: Chainlink BTC/USD price at window opening.
-        """
-        self.price_to_beat = price
-        logger.info("Price to beat set for new window", price_to_beat=price)
-
     def get_price_to_beat(self) -> Optional[float]:
         """Get the price to beat for the current 5-minute window.
+
+        Set by TradingLoop at T=0 via set_price_to_beat().
 
         Returns:
             Price to beat or None if not available.
