@@ -17,9 +17,12 @@ def mock_feed_manager():
     feed_manager.binance_feed = MagicMock()
     feed_manager.binance_feed.get_latest_price = MagicMock(return_value=50000.0)
     feed_manager.polymarket_rtds_feed = MagicMock()
+    feed_manager.polymarket_rtds_feed.get_chainlink_price = MagicMock(return_value=49900.0)
+    feed_manager.polymarket_rtds_feed.set_price_to_beat = MagicMock(return_value=None)
     feed_manager.polymarket_rtds_feed.get_price_to_beat = MagicMock(return_value=49900.0)
     feed_manager.polymarket_clob_feed = MagicMock()
     feed_manager.polymarket_clob_feed.get_best_ask = MagicMock(return_value=0.5)
+    feed_manager.polymarket_clob_feed.subscribe_assets = AsyncMock(return_value=None)
     return feed_manager
 
 

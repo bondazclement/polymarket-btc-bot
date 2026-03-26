@@ -3,12 +3,19 @@ Polymarket RTDS WebSocket feed for Chainlink BTC/USD prices.
 
 This module connects to the Polymarket RTDS WebSocket stream,
 subscribes to the Chainlink BTC/USD price feed, and maintains
-the current price and price_to_beat for the active 5-minute window.
+the current price.
+
+MCP-VERIFIED (2026-03-25):
+- Subscribe format: {"type": "subscribe", "topic": "crypto_prices_chainlink",
+                     "filter": {"symbol": "btc/usd"}}
+- Incoming message format: {"topic": "...", "type": "update", "timestamp": ...,
+                             "payload": {"symbol": "btc/usd", "value": 45000.5, ...}}
+- price_to_beat is NOT set via a RTDS event — it is set by loop.py at T=0
+  via set_price_to_beat() after reading get_chainlink_price().
 """
 
 import asyncio
 import time
-from dataclasses import dataclass
 from typing import Optional
 
 import aiohttp
@@ -21,26 +28,14 @@ from src.config import CONFIG
 logger = get_logger(__name__)
 
 
-@dataclass(slots=True)
-class ChainlinkPrice:
-    """Dataclass representing a Chainlink BTC/USD price.
-
-    Attributes:
-        price: BTC/USD price.
-        timestamp: Unix timestamp in milliseconds.
-    """
-
-    price: float
-    timestamp: int
-
-
 class PolymarketRTDS:
     """Polymarket RTDS WebSocket client for Chainlink BTC/USD prices.
 
     Attributes:
         ws_url: WebSocket URL for Polymarket RTDS.
-        current_price: Current Chainlink BTC/USD price.
+        current_price: Current Chainlink BTC/USD price (updated continuously).
         price_to_beat: Price at the start of the current 5-minute window.
+                       Set by TradingLoop via set_price_to_beat() at T=0.
         reconnect_attempts: Number of reconnection attempts.
         max_reconnect_delay: Maximum delay between reconnection attempts.
     """
@@ -49,7 +44,7 @@ class PolymarketRTDS:
         """Initialize the Polymarket RTDS client."""
         self.ws_url: str = CONFIG.POLYMARKET_RTDS_URL
         self.current_price: Optional[float] = None
-        self.price_to_beat: Optional[float] = None
+        self.price_to_beat: Optional[float] = None  # Set by TradingLoop via set_price_to_beat()
         self.reconnect_attempts: int = 0
         self.max_reconnect_delay: int = 30
         self.ws: aiohttp.ClientWebSocketResponse | None = None
@@ -77,23 +72,22 @@ class PolymarketRTDS:
             await self._reconnect()
 
     async def _subscribe(self) -> None:
-        """Subscribe to the Chainlink BTC/USD price feed."""
-        # TODO: Validate subscribe message format and response types
-        # against live Polymarket WebSocket during first dry-run.
-        # Current format is based on documentation review;
-        # may need adjustment based on actual API responses.
+        """Subscribe to the Chainlink BTC/USD price feed via RTDS.
+
+        Uses the official RTDS subscription format with type/topic/filter.
+        """
         if self.ws is None:
             return
 
         subscribe_message = orjson.dumps(
             {
-                "action": "subscribe",
-                "channel": "crypto_prices_chainlink",
-                "symbol": "BTC/USD",
+                "type": "subscribe",
+                "topic": "crypto_prices_chainlink",
+                "filter": {"symbol": "btc/usd"},
             }
         )
         await self.ws.send_str(subscribe_message.decode())
-        logger.info("Subscribed to Chainlink BTC/USD price feed")
+        logger.info("Subscribed to RTDS Chainlink BTC/USD feed")
 
     async def _listen(self) -> None:
         """Listen for incoming messages from the WebSocket."""
@@ -110,20 +104,32 @@ class PolymarketRTDS:
                 break
 
     def _handle_message(self, data: dict) -> None:
-        """Handle incoming messages from the WebSocket.
+        """Handle incoming RTDS messages.
+
+        Parses Chainlink price update events (type: "update", topic: "crypto_prices_chainlink").
+        The price_to_beat is NOT set here — it is set by loop.py at window T=0
+        via set_price_to_beat().
 
         Args:
-            data: Raw message data.
+            data: Raw RTDS message dict.
         """
         try:
-            if data.get("type") == "price_update":
-                self.current_price = float(data["price"])
-                logger.debug("Chainlink price updated", price=self.current_price)
-            elif data.get("type") == "window_start":
-                self.price_to_beat = float(data["price"])
-                logger.info("New 5-minute window started", price_to_beat=self.price_to_beat)
-        except (KeyError, ValueError) as e:
-            logger.error("Failed to handle Polymarket RTDS message", error=str(e))
+            topic = data.get("topic", "")
+            msg_type = data.get("type", "")
+
+            if topic == "crypto_prices_chainlink" and msg_type == "update":
+                payload = data.get("payload", {})
+                value = payload.get("value")
+                if value is not None:
+                    self.current_price = float(value)
+                    logger.debug("Chainlink price updated", price=self.current_price)
+
+        except (KeyError, ValueError, TypeError) as e:
+            logger.error(
+                "Failed to handle RTDS message",
+                error=str(e),
+                data=str(data)[:200],
+            )
 
     async def _reconnect(self) -> None:
         """Reconnect with exponential backoff."""
@@ -147,6 +153,19 @@ class PolymarketRTDS:
             Current Chainlink price or None if not available.
         """
         return self.current_price
+
+    def set_price_to_beat(self, price: float) -> None:
+        """Set the opening price for the current 5-minute window.
+
+        Called by TradingLoop at window T=0 after reading get_chainlink_price().
+        This replaces the former 'window_start' event which does not exist in
+        the real RTDS API.
+
+        Args:
+            price: Chainlink BTC/USD price at window opening.
+        """
+        self.price_to_beat = price
+        logger.info("Price to beat set for new window", price_to_beat=price)
 
     def get_price_to_beat(self) -> Optional[float]:
         """Get the price to beat for the current 5-minute window.

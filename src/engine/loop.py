@@ -73,15 +73,15 @@ class TradingLoop:
         window_start = get_window_start()
         logger.info("New window started", window_start=window_start)
 
-        price_to_beat = self.feeds.polymarket_rtds_feed.get_price_to_beat()
-        if price_to_beat is None:
-            logger.error("Failed to get opening Chainlink price")
+        opening_price = self.feeds.polymarket_rtds_feed.get_chainlink_price()
+        if opening_price is None:
+            logger.error("Failed to get opening Chainlink price — RTDS not connected or no data yet")
             return
-
-        logger.info("Window started", price_to_beat=price_to_beat)
+        self.feeds.polymarket_rtds_feed.set_price_to_beat(opening_price)
+        logger.info("Window opened", price_to_beat=opening_price)
 
         # Resolve slug, token IDs, and condition ID
-        slug = get_current_slug()
+        slug = get_current_slug(timestamp=window_start)
         market_data = await resolve_market_data(slug)
         if market_data is None:
             logger.error("Failed to resolve market data", slug=slug)
@@ -95,6 +95,16 @@ class TradingLoop:
             "Market data resolved",
             slug=slug,
             condition_id=condition_id,
+            up_token_id=up_token_id,
+            down_token_id=down_token_id,
+        )
+
+        # Subscribe CLOB WS to this window's token IDs (dynamic, after slug resolution)
+        await self.feeds.polymarket_clob_feed.subscribe_assets(
+            [up_token_id, down_token_id]
+        )
+        logger.info(
+            "CLOB subscribed to window assets",
             up_token_id=up_token_id,
             down_token_id=down_token_id,
         )
